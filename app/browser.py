@@ -70,6 +70,14 @@ def browser_alive(port: int) -> bool:
         return False
 
 
+def _remove_stale_profile_locks(profile: Path) -> None:
+    """Discard Chromium singleton links left by a stopped container."""
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        link = profile / name
+        if link.is_symlink():
+            link.unlink()
+
+
 def start_managed_browser(account: dict[str, Any], *, chrome: str, profiles: Path) -> int:
     account_id = int(account["id"])
     port = 19300 + account_id
@@ -93,6 +101,8 @@ def start_managed_browser(account: dict[str, Any], *, chrome: str, profiles: Pat
                 existing.wait(timeout=4)
             except subprocess.TimeoutExpired:
                 existing.kill()
+                existing.wait(timeout=4)
+        _remove_stale_profile_locks(profile)
         _PROCESSES[account_id] = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                                   stderr=subprocess.DEVNULL,
                                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)

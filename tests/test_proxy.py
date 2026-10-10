@@ -1,12 +1,23 @@
 import pytest
 
-from app.browser import BrowserError, start_managed_browser
+from app.browser import BrowserError, _remove_stale_profile_locks, start_managed_browser
 from app.media import _download
 
 
 def test_managed_browser_requires_account_proxy(tmp_path):
     with pytest.raises(BrowserError, match="account proxy must be"):
         start_managed_browser({"id": 1, "proxy_url": ""}, chrome="chromium", profiles=tmp_path)
+
+
+def test_stale_chromium_singleton_links_are_removed(tmp_path):
+    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        (tmp_path / name).symlink_to("old-container")
+    keep = tmp_path / "Preferences"
+    keep.write_text("saved login state", encoding="utf-8")
+    _remove_stale_profile_locks(tmp_path)
+    assert not any((tmp_path / name).is_symlink() for name in
+                   ("SingletonLock", "SingletonSocket", "SingletonCookie"))
+    assert keep.read_text(encoding="utf-8") == "saved login state"
 
 
 def test_media_download_uses_account_proxy_only(monkeypatch):
