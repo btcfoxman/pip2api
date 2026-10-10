@@ -124,6 +124,14 @@ jobs:
             sudo install -m 600 -o root -g root "$tmp" "$CLOUDFLARED_CONFIG"
           fi
           sudo cloudflared tunnel --config "$CLOUDFLARED_CONFIG" ingress validate
+          tunnel_id="$(sudo awk '/^tunnel:/ {print $2; exit}' "$CLOUDFLARED_CONFIG")"
+          test -n "$tunnel_id"
+          origin_cert="${HOME}/.cloudflared/cert.pem"
+          if [ -f "$origin_cert" ]; then
+            cloudflared --origincert "$origin_cert" tunnel route dns "$tunnel_id" "$PIP2API_HOSTNAME" || true
+          else
+            sudo cloudflared tunnel route dns "$tunnel_id" "$PIP2API_HOSTNAME" || true
+          fi
           sudo systemctl restart cloudflared
       - name: Verify public endpoint
         shell: bash
