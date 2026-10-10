@@ -105,18 +105,23 @@ jobs:
           if not any(line.strip() == 'ingress:' for line in lines):
               raise SystemExit('cloudflared ingress section is missing')
           route = f'- hostname: {hostname}'
+          fallback = next((line for line in lines if line.strip() == '- service: http_status:404'), None)
+          if fallback is None:
+              raise SystemExit('cloudflared fallback ingress is missing')
+          item_indent = fallback[:len(fallback) - len(fallback.lstrip())]
+          service_indent = item_indent + '  '
           index = next((i for i, line in enumerate(lines) if line.strip() == route), None)
           if index is None:
-              index = next((i for i, line in enumerate(lines) if line.strip() == '- service: http_status:404'), len(lines))
-              lines[index:index] = [f'  {route}', f'    service: {service}']
+              index = next(i for i, line in enumerate(lines) if line.strip() == '- service: http_status:404')
+              lines[index:index] = [f'{item_indent}{route}', f'{service_indent}service: {service}']
           else:
               next_route = next((i for i in range(index + 1, len(lines)) if lines[i].strip().startswith('- ')), len(lines))
               found = next((i for i in range(index + 1, next_route) if lines[i].strip().startswith('service:')), None)
+              lines[index] = f'{item_indent}{route}'
               if found is None:
-                  lines.insert(index + 1, f'    service: {service}')
+                  lines.insert(index + 1, f'{service_indent}service: {service}')
               else:
-                  indent = lines[found][:len(lines[found]) - len(lines[found].lstrip())]
-                  lines[found] = f'{indent}service: {service}'
+                  lines[found] = f'{service_indent}service: {service}'
           path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
           PY
           if ! cmp -s "$tmp" <(sudo cat "$CLOUDFLARED_CONFIG"); then
