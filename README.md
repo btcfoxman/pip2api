@@ -1,0 +1,47 @@
+# PIP2API
+
+PIP2API exposes Pippit's logged-in web video workflow as a task API. The management console follows the AK2API account pool and task layout. Upstream video requests use the web `agent/submit_run` direct video tool. Media are uploaded through the same logged-in Chromium session, including its native file upload control. The separate Pippit Skills API and API keys are not used.
+
+## Deployment
+
+Copy `.env.example` to `.env` and set unique `PIP_API_KEY` and `PIP_ADMIN_TOKEN` values. Start with `docker compose up -d`. The console is on port `8807` by default; `/health` is unauthenticated. Each account needs its own managed Chromium profile. Add the account in the console, open **Web login**, log in and open a video project, then click **Save login session**. The service records the project ID and credit buckets during account check.
+
+The preproduction workflow is `.github/workflows/deploy-test.yml`. It builds an image in GHCR and deploys on the `pip2api-pre` self-hosted runner on 3.5 pre. Prepare `/home/btcfoxman/docker/pip2api/.env` on the server and register the runner before dispatch. The workflow also manages the `pip2api.aiid.edu.kg` cloudflared ingress.
+
+## Video API
+
+All API endpoints require `Authorization: Bearer <PIP_API_KEY>` or `X-API-Key`.
+
+```http
+POST /v1/videos
+Content-Type: application/json
+```
+
+```json
+{
+  "model": "sd-2-0-mini-480p",
+  "prompt": "A blue bird sits on a branch beside image1. Use audio1 and video1 as references.",
+  "duration": 4,
+  "aspect_ratio": "16:9",
+  "image_urls": ["https://example.com/image.png"],
+  "audio_urls": ["https://example.com/audio.wav"],
+  "video_urls": ["https://example.com/reference.mp4"],
+  "background": true
+}
+```
+
+The response contains a `pip_...` task ID. Poll `GET /v1/videos/{task_id}` for `queued`, `preparing`, `submitted`, `running`, `succeeded`, `failed`, or `expired`. Successful video URLs appear in `data[].url`; `GET /v1/videos/{task_id}/content` redirects to the first video. A caller may also supply `pippit:<asset-id>` for an asset already uploaded to that same account. Plain image, video and audio URLs, or base64 data URLs, are supported.
+
+Prompt references such as `视频1`, `video2`, `v3`, `视4`, `图片1`, `图1`, `img2`, `Image3`, `Audio1`, and `音频2` are bound by their one-based index to the corresponding uploaded asset. Out-of-range references fail before upstream submission. Seedance 2.0 models accept up to 9 images, 3 videos, and 3 audio clips; Seedance 2.5 models accept up to 30, 10, and 10 respectively. The requested duration, ratio, resolution and model are sent as direct tool parameters.
+
+`GET /v1/models` lists the 11 public aliases and limits. Aliases without a resolution suffix default to 720p. The console shows observed credit usage by exact model, duration, resolution, and media counts. These observations guide account selection; no unsupported fixed credit formula is assumed.
+
+## Operations
+
+- Account concurrency defaults to 1 and can be changed to at most 50. Global workers and queue capacity are configured in the console. Queue overflow returns HTTP 429 before upstream submission.
+- A complete upstream rejection is recorded as `UPSTREAM_REJECTED`. An interrupted submit with unknown outcome is recorded as `UPSTREAM_SUBMIT_OUTCOME_UNKNOWN`; it is never automatically resubmitted.
+- The daily credit claim is optional. Enable it in runtime settings or click the account check-in endpoint. Each account is claimed at most once per Taiwan calendar day.
+- Media download first uses a direct connection, then the account or fallback proxy. Browser upload uses the logged-in Chromium tab. The service does not need a Pippit Skills key.
+- The account login screen sends click, scroll, text and key actions to the managed browser via CDP. Passwords typed there are not stored by PIP2API. Chrome profile data remain under `PIP_CHROME_USER_DATA_ROOT` and are removed when a service-managed account profile is reset or deleted.
+
+The upstream web protocol can change. If Pippit changes its direct tool or browser upload flow, an upstream rejection is surfaced in the task record rather than silently changing the requested generation parameters.

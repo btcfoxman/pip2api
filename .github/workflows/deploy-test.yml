@@ -1,0 +1,136 @@
+name: Pre-production Docker
+
+on:
+  push:
+    branches: [pre]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: pip2api-pre-production
+  cancel-in-progress: false
+
+env:
+  IMAGE_REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: btcfoxman
+  IMAGE_NAME: pip2api
+  DEPLOY_PATH: /home/btcfoxman/docker/pip2api
+  DEPLOY_SERVICE: pip2api
+  PIP2API_HOSTNAME: pip2api.aiid.edu.kg
+  PIP2API_ORIGIN: http://127.0.0.1:8807
+  CLOUDFLARED_CONFIG: /etc/cloudflared/config.yml
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/btcfoxman/pip2api:${{ github.sha }}
+            ghcr.io/btcfoxman/pip2api:latest
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+
+  deploy:
+    needs: build
+    runs-on: [self-hosted, linux, x64, pip2api-pre]
+    env:
+      IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare compose project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$DEPLOY_PATH"
+          test -f "$DEPLOY_PATH/.env"
+          cp docker-compose.yml "$DEPLOY_PATH/docker-compose.yml"
+          docker network inspect my-shared-net >/dev/null 2>&1 || docker network create my-shared-net
+      - name: Pull and start
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$DEPLOY_PATH"
+          IMAGE_REGISTRY="$IMAGE_REGISTRY" IMAGE_NAMESPACE="$IMAGE_NAMESPACE" IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" docker compose pull "$DEPLOY_SERVICE"
+          IMAGE_REGISTRY="$IMAGE_REGISTRY" IMAGE_NAMESPACE="$IMAGE_NAMESPACE" IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" docker compose up -d "$DEPLOY_SERVICE"
+      - name: Verify service
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 5 "$PIP2API_ORIGIN/health" >/dev/null; then exit 0; fi
+            sleep 5
+          done
+          docker logs --tail 120 pip2api
+          exit 1
+      - name: Configure cloudflared ingress
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo test -f "$CLOUDFLARED_CONFIG"
+          tmp="$(mktemp)"
+          trap 'rm -f "$tmp"' EXIT
+          sudo cat "$CLOUDFLARED_CONFIG" > "$tmp"
+          CLOUDFLARED_TMP="$tmp" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path(os.environ['CLOUDFLARED_TMP'])
+          lines = path.read_text(encoding='utf-8').splitlines()
+          hostname = os.environ['PIP2API_HOSTNAME']
+          service = os.environ['PIP2API_ORIGIN']
+          if not any(line.strip() == 'ingress:' for line in lines):
+              raise SystemExit('cloudflared ingress section is missing')
+          route = f'- hostname: {hostname}'
+          index = next((i for i, line in enumerate(lines) if line.strip() == route), None)
+          if index is None:
+              index = next((i for i, line in enumerate(lines) if line.strip() == '- service: http_status:404'), len(lines))
+              lines[index:index] = [f'  {route}', f'    service: {service}']
+          else:
+              next_route = next((i for i in range(index + 1, len(lines)) if lines[i].strip().startswith('- ')), len(lines))
+              found = next((i for i in range(index + 1, next_route) if lines[i].strip().startswith('service:')), None)
+              if found is None:
+                  lines.insert(index + 1, f'    service: {service}')
+              else:
+                  indent = lines[found][:len(lines[found]) - len(lines[found].lstrip())]
+                  lines[found] = f'{indent}service: {service}'
+          path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+          if ! cmp -s "$tmp" <(sudo cat "$CLOUDFLARED_CONFIG"); then
+            sudo cp "$CLOUDFLARED_CONFIG" "${CLOUDFLARED_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+            sudo install -m 600 -o root -g root "$tmp" "$CLOUDFLARED_CONFIG"
+          fi
+          sudo cloudflared tunnel --config "$CLOUDFLARED_CONFIG" ingress validate
+          sudo systemctl restart cloudflared
+      - name: Verify public endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 10 "https://${PIP2API_HOSTNAME}/health" >/dev/null; then exit 0; fi
+            sleep 5
+          done
+          exit 1

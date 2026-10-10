@@ -1,0 +1,1 @@
+"""Pippit web protocol gateway."""
