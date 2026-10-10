@@ -131,7 +131,7 @@ class Service:
     def _reserve_account(self, estimated_cost: float = 0) -> dict[str, Any] | None:
         with self._lock:
             accounts = [item for item in self.store.accounts(private=True)
-                        if item["enabled"] and item["status"] == "active"
+                        if item["enabled"] and item["status"] == "active" and item["proxy_url"]
                         and (item["balance"] is None or float(item["balance"]) >= estimated_cost)]
             accounts.sort(key=lambda item: (-(float(item["balance"] or 0)), item["id"]))
             for account in accounts:
@@ -152,7 +152,8 @@ class Service:
         if not account:
             raise KeyError(account_id)
         port = int(account["cdp_port"] or 0)
-        if start_browser or not port:
+        managed_port = 19300 + account_id
+        if start_browser or not port or (port == managed_port and not browser_alive(port)):
             port = start_managed_browser(account, chrome=str(self.settings()["chrome_executable"]),
                                          profiles=Path(str(self.settings()["chrome_user_data_root"])))
             self.store.update_account(account_id, {"cdp_port": port})

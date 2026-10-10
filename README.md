@@ -8,6 +8,8 @@ Copy `.env.example` to `.env` and set unique `PIP_API_KEY` and `PIP_ADMIN_TOKEN`
 
 The preproduction workflow is `.github/workflows/deploy-test.yml`. It builds an image in GHCR and deploys on the `pip2api-pre` self-hosted runner on 3.5 pre. Prepare `/home/btcfoxman/docker/pip2api/.env` on the server and register the runner before dispatch. The workflow also manages the `pip2api.aiid.edu.kg` cloudflared ingress.
 
+Set a SOCKS or HTTP proxy on each account before opening its managed browser. Pippit login, credit, upload, submit, and polling requests all use that account's proxied Chromium session. The managed browser refuses to start without an account proxy. For `pip-1.bat`, the account's server-side proxy is `socks5://host.docker.internal:20001`, corresponding to the launcher's `socks5://127.0.0.1:20001` on the host.
+
 ## Video API
 
 All API endpoints require `Authorization: Bearer <PIP_API_KEY>` or `X-API-Key`.

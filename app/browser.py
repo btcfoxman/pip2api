@@ -32,6 +32,18 @@ class BrowserRejected(BrowserError):
     """A complete HTTP response established that the upstream rejected a call."""
 
 
+def account_proxy_url(account: dict[str, Any]) -> str:
+    value = str(account.get("proxy_url") or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    try:
+        valid = parsed.scheme in {"socks5", "http", "https"} and bool(parsed.hostname) and bool(parsed.port)
+    except ValueError:
+        valid = False
+    if not valid or parsed.path or parsed.query or parsed.fragment:
+        raise BrowserError("account proxy must be a SOCKS5 or HTTP proxy with host and port")
+    return value
+
+
 def _targets(port: int) -> list[dict[str, Any]]:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
@@ -60,9 +72,7 @@ def browser_alive(port: int) -> bool:
 
 def start_managed_browser(account: dict[str, Any], *, chrome: str, profiles: Path) -> int:
     account_id = int(account["id"])
-    port = int(account.get("cdp_port") or 19300 + account_id)
-    if browser_alive(port):
-        return port
+    port = 19300 + account_id
     profile = profiles / str(account_id)
     profile.mkdir(parents=True, exist_ok=True)
     args = [chrome, f"--user-data-dir={profile}", f"--remote-debugging-port={port}",
@@ -70,20 +80,36 @@ def start_managed_browser(account: dict[str, Any], *, chrome: str, profiles: Pat
             "--no-default-browser-check", "--password-store=basic", "--window-size=1280,960"]
     if os.name != "nt":
         args += ["--no-sandbox", "--disable-dev-shm-usage"]
-    if account.get("proxy_url"):
-        args.append("--proxy-server=" + str(account["proxy_url"]))
+    proxy_url = account_proxy_url(account)
+    args.append("--proxy-server=" + proxy_url)
     args.append(BASE + "/home")
     with _PROCESS_LOCK:
+        if browser_alive(port):
+            return port
         existing = _PROCESSES.get(account_id)
         if existing and existing.poll() is None:
-            raise BrowserError("managed Chrome is still starting")
+            existing.terminate()
+            try:
+                existing.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                existing.kill()
         _PROCESSES[account_id] = subprocess.Popen(args, stdout=subprocess.DEVNULL,
                                                   stderr=subprocess.DEVNULL,
                                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-    for _ in range(100):
-        if browser_alive(port):
-            return port
-        time.sleep(.1)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if browser_alive(port):
+                return port
+            time.sleep(.1)
+        try:
+            pages = [item for item in _targets(port) if item.get("type") == "page"]
+            hosts = {urllib.parse.urlsplit(str(item.get("url") or "")).hostname for item in pages}
+            redirected = sorted(host for host in hosts if host and not host.endswith("pippit.ai"))
+            if redirected:
+                raise BrowserError(f"Pippit browser reached {redirected[0]}; configure an account proxy")
+        except BrowserError as exc:
+            if "configure an account proxy" in str(exc):
+                raise
     raise BrowserError("managed Pippit Chrome did not start")
 
 

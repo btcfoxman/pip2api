@@ -8,7 +8,7 @@ import time
 import uuid
 from typing import Any
 
-from .browser import CDPBrowser
+from .browser import CDPBrowser, account_proxy_url
 from .catalog import bind_prompt
 from .media import upload_media
 
@@ -136,6 +136,7 @@ def extract_result_urls(run: dict[str, Any]) -> list[str]:
 
 class PippitClient:
     def __init__(self, account: dict[str, Any]):
+        account_proxy_url(account)
         self.account = account
         self.browser = CDPBrowser(int(account["cdp_port"]))
 

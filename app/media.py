@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-import os
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -39,16 +38,17 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
         parsed = urlsplit(source)
         if not parsed.hostname or parsed.username or parsed.password:
             raise MediaError("media URL is invalid")
-        routes = [None]
-        for item in (proxy_url, os.getenv("PIP_MEDIA_FALLBACK_PROXY_URL", "")):
-            if item and item not in routes:
-                routes.append(item)
-        last_error = "download failed"
-        for proxy in routes:
-            try:
-                response = requests.get(source, timeout=120, stream=True,
-                                        proxies={"http": proxy, "https": proxy} if proxy else {"http": "", "https": ""},
-                                        headers={"User-Agent": "Mozilla/5.0"})
+        if not proxy_url:
+            raise MediaError("account proxy is required for media download")
+        # Requests' socks5h form resolves the destination through the same
+        # account proxy that Chromium uses for Pippit traffic.
+        proxy = proxy_url.replace("socks5://", "socks5h://", 1)
+        session = requests.Session()
+        session.trust_env = False
+        try:
+            with session.get(source, timeout=120, stream=True,
+                             proxies={"http": proxy, "https": proxy},
+                             headers={"User-Agent": "Mozilla/5.0"}) as response:
                 response.raise_for_status()
                 chunks = []
                 total = 0
@@ -60,13 +60,10 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
                 data = b"".join(chunks)
                 mime = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].lower()
                 filename = Path(parsed.path).name or kind + MIME_EXTENSIONS.get(mime, ".bin")
-                break
-            except MediaError:
-                raise
-            except requests.RequestException as exc:
-                last_error = type(exc).__name__
-        else:
-            raise MediaError(f"media download failed: {last_error}")
+        except requests.RequestException as exc:
+            raise MediaError(f"media download failed through account proxy: {type(exc).__name__}") from exc
+        finally:
+            session.close()
     else:
         raise MediaError("media must be an HTTPS URL, HTTP URL, data URL, or Pippit asset ID")
     if not data:

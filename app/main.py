@@ -15,7 +15,7 @@ from fastapi import Body, Cookie, Depends, FastAPI, Header, HTTPException, Reque
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .browser import BrowserError, CDPBrowser, clear_managed_profile, start_managed_browser, stop_managed_browser
+from .browser import BrowserError, CDPBrowser, browser_alive, clear_managed_profile, start_managed_browser, stop_managed_browser
 from .catalog import public_models
 from .service import Service
 from .store import Store
@@ -176,6 +176,13 @@ def batch_import(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
 @app.patch("/api/accounts/{account_id}", dependencies=[Depends(admin_auth)])
 def patch_account(account_id: int, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
     try:
+        account = _account(account_id, private=True)
+        if "proxy_url" in body and str(body["proxy_url"]).strip() != str(account["proxy_url"]).strip():
+            port = int(account["cdp_port"] or 0)
+            if port and port != 19300 + account_id:
+                raise HTTPException(status_code=409, detail="relaunch the external account browser with the new proxy first")
+            stop_managed_browser(account_id)
+            body = {**body, "cdp_port": 0, "status": "pending", "last_error": ""}
         return store.update_account(account_id, body)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="account not found") from exc
@@ -243,9 +250,12 @@ def checkin_account(account_id: int) -> dict[str, Any]:
 def _browser(account_id: int, *, start: bool = False) -> tuple[dict[str, Any], CDPBrowser]:
     account = _account(account_id, private=True)
     port = int(account["cdp_port"] or 0)
-    if start and not port:
-        port = start_managed_browser(account, chrome=str(service.settings()["chrome_executable"]),
-                                     profiles=Path(str(service.settings()["chrome_user_data_root"])))
+    if start and (not port or (port == 19300 + account_id and not browser_alive(port))):
+        try:
+            port = start_managed_browser(account, chrome=str(service.settings()["chrome_executable"]),
+                                         profiles=Path(str(service.settings()["chrome_user_data_root"])))
+        except BrowserError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         store.update_account(account_id, {"cdp_port": port})
     if not port:
         raise HTTPException(status_code=409, detail="account browser is not configured")
