@@ -10,8 +10,11 @@ def test_managed_browser_requires_account_proxy(tmp_path):
 
 
 def test_stale_chromium_singleton_links_are_removed(tmp_path):
-    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
-        (tmp_path / name).symlink_to("old-container")
+    try:
+        for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            (tmp_path / name).symlink_to("old-container")
+    except OSError:
+        pytest.skip("this Windows user cannot create symbolic links")
     keep = tmp_path / "Preferences"
     keep.write_text("saved login state", encoding="utf-8")
     _remove_stale_profile_locks(tmp_path)
