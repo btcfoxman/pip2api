@@ -60,11 +60,15 @@ def api_auth(authorization: str | None = Header(default=None),
         raise HTTPException(status_code=401, detail="invalid API key")
 
 
-def admin_auth(pip_admin: str | None = Cookie(default=None),
-               x_admin_token: str | None = Header(default=None)) -> None:
+def _admin_authorized(pip_admin: str | None, x_admin_token: str | None) -> bool:
     header_ok = bool(x_admin_token) and secrets.compare_digest(x_admin_token, ADMIN_TOKEN)
     cookie_ok = bool(pip_admin) and secrets.compare_digest(pip_admin, ADMIN_COOKIE)
-    if not (header_ok or cookie_ok):
+    return header_ok or cookie_ok
+
+
+def admin_auth(pip_admin: str | None = Cookie(default=None),
+               x_admin_token: str | None = Header(default=None)) -> None:
+    if not _admin_authorized(pip_admin, x_admin_token):
         raise HTTPException(status_code=401, detail="admin login required")
 
 
@@ -95,13 +99,15 @@ def health() -> dict[str, Any]:
 
 
 @app.get("/login")
-def login_page() -> HTMLResponse:
+def login_page(error: str | None = None) -> HTMLResponse:
+    notice = "<p role='alert'>Invalid admin token. Please try again.</p>" if error == "invalid" else ""
     return HTMLResponse("""<!doctype html><meta charset='utf-8'><title>PIP2API sign in</title>
     <style>body{font:16px system-ui;background:#f4f5f8;display:grid;place-items:center;min-height:95vh}
     form{background:white;padding:32px;border-radius:16px;box-shadow:0 12px 40px #0002;min-width:300px}
     input,button{box-sizing:border-box;width:100%;padding:12px;margin-top:14px;border-radius:8px}
     button{background:#4450d4;color:white;border:0;cursor:pointer}</style>
-    <form action='/login' method='post'><h1>PIP2API</h1><label>Admin token<input name='token' type='password' autofocus required></label>
+    <form action='/login' method='post'><h1>PIP2API</h1>""" + notice + """
+    <label>Admin token<input name='token' type='password' autofocus required></label>
     <button type='submit'>Sign in</button></form>""")
 
 
@@ -109,7 +115,7 @@ def login_page() -> HTMLResponse:
 async def login(request: Request) -> RedirectResponse:
     form = await request.form()
     if not secrets.compare_digest(str(form.get("token") or ""), ADMIN_TOKEN):
-        raise HTTPException(status_code=401, detail="invalid admin token")
+        return RedirectResponse("/login?error=invalid", status_code=303)
     response = RedirectResponse("/", status_code=303)
     response.set_cookie("pip_admin", ADMIN_COOKIE, httponly=True, samesite="strict",
                         secure=request.url.scheme == "https", max_age=30 * 86400)
@@ -123,8 +129,11 @@ def logout() -> RedirectResponse:
     return response
 
 
-@app.get("/", dependencies=[Depends(admin_auth)])
-def home() -> FileResponse:
+@app.get("/")
+def home(pip_admin: str | None = Cookie(default=None),
+         x_admin_token: str | None = Header(default=None)):
+    if not _admin_authorized(pip_admin, x_admin_token):
+        return RedirectResponse("/login", status_code=303)
     return FileResponse(STATIC / "index.html")
 
 
