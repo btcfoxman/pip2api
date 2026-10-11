@@ -244,14 +244,27 @@ class Store:
         with self._connect() as db:
             return int(db.execute("SELECT COUNT(*) FROM tasks WHERE status IN ('queued','preparing','submitted','running')").fetchone()[0])
 
+    def has_account_overlap(self, account_id: int, task_id: str,
+                            started_at: float, finished_at: float) -> bool:
+        with self._connect() as db:
+            return bool(db.execute("""SELECT 1 FROM tasks
+                WHERE account_id=? AND id<>? AND created_at<?
+                  AND COALESCE(completed_at, 9999999999)>? LIMIT 1""",
+                (account_id, task_id, finished_at, started_at)).fetchone())
+
     def clear_terminal_tasks(self) -> int:
         with self._lock, self._connect() as db:
             return db.execute("DELETE FROM tasks WHERE status IN ('succeeded','failed','expired')").rowcount
 
     def model_costs(self) -> list[dict[str, Any]]:
         with self._connect() as db:
-            rows = db.execute("""SELECT id,model,normalized_json,actual_cost,updated_at FROM tasks
-                WHERE status='succeeded' AND actual_cost IS NOT NULL ORDER BY updated_at DESC LIMIT 1000""").fetchall()
+            rows = db.execute("""SELECT t.id,t.model,t.normalized_json,t.actual_cost,t.updated_at
+                FROM tasks AS t WHERE t.status='succeeded' AND t.actual_cost IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM tasks AS peer
+                    WHERE peer.account_id=t.account_id AND peer.id<>t.id
+                      AND peer.created_at<t.completed_at
+                      AND COALESCE(peer.completed_at, 9999999999)>t.created_at)
+                ORDER BY t.updated_at DESC LIMIT 1000""").fetchall()
         grouped: dict[tuple[str, int, str, int, int, int], dict[str, Any]] = {}
         for row in rows:
             request = json.loads(row["normalized_json"])

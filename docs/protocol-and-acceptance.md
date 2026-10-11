@@ -17,6 +17,8 @@ When a fixed ratio and video reference are present, PIP2API adds a short referen
 
 Caller-owned public media are first fetched through the account proxy. If the same public host required a successful direct fallback, subsequent downloads from that host use the direct route for two minutes; Pippit domains and private hosts always remain on the account proxy.
 
+Credit deltas are used as per-task cost observations only when no other task on that account overlaps the observation window. Concurrent tasks can share the same starting balance, so their deltas are not reliable per-task prices.
+
 ## Live acceptance
 
 - Public API task: `pip_67e81942ec654b91`

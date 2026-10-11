@@ -283,10 +283,14 @@ class Service:
                 except BrowserError:
                     pass
                 before = task.get("balance_before")
+                finished_at = time.time()
+                isolated = not self.store.has_account_overlap(
+                    int(task["account_id"]), task_id, task["created_at"], finished_at)
                 self.store.update_task(task_id, {"status": "succeeded", "progress": 100,
                     "result_urls": state["result_urls"], "balance_after": after,
-                    "actual_cost": max(0, float(before) - float(after)) if before is not None and after is not None else None,
-                    "completed_at": time.time()})
+                    "actual_cost": max(0, float(before) - float(after))
+                        if isolated and before is not None and after is not None else None,
+                    "completed_at": finished_at})
                 return
             if state["status"] == "failed":
                 reason = state["error"] or "Pippit video generation failed"
