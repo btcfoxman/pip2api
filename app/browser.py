@@ -288,38 +288,53 @@ class CDPBrowser:
 
         create_body: dict[str, Any] | None = None
         create_result: dict[str, Any] | None = None
+        intercept_chooser = False
         try:
             command("Page.enable")
             command("Network.enable")
-            command("Page.setInterceptFileChooserDialog", {"enabled": True})
-            menu_point = evaluate("""(()=>{let x=document.querySelector('[role=menuitem]');
-              let r=x?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()""")
-            if not menu_point:
-                button_point = evaluate(r"""(()=>{let x=[...document.querySelectorAll('[aria-label]')]
-                  .find(x=>x.getAttribute('aria-label')==='\u4e0a\u4f20\u53c2\u8003\u7d20\u6750')
-                  || document.querySelector('button:has([data-slot="home-input-add-icon"])');
-                  let r=x?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()""")
-                if not button_point:
-                    raise BrowserError("Pippit reference upload button is unavailable")
-                click(button_point)
-                time.sleep(.2)
+            # Current Pippit keeps its composer input mounted even when the upload
+            # dropdown does not open. Setting this input dispatches the same change
+            # event as the browser file picker and preserves the account's proxy.
+            root = command("DOM.getDocument").get("root", {}).get("nodeId")
+            node = command("DOM.querySelector", {"nodeId": root,
+                "selector": '[data-slot="prompt-composer-resource-runtime"] input[type="file"][multiple]'})
+            input_node_id = node.get("nodeId")
+            if input_node_id:
+                command("DOM.setFileInputFiles", {"files": [str(path.resolve())],
+                        "nodeId": input_node_id})
+            else:
+                # Older composer versions expose the input only after opening a menu.
+                command("Page.setInterceptFileChooserDialog", {"enabled": True})
+                intercept_chooser = True
                 menu_point = evaluate("""(()=>{let x=document.querySelector('[role=menuitem]');
                   let r=x?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()""")
-            if not menu_point:
-                raise BrowserError("Pippit upload menu is unavailable")
-            click(menu_point)
-            chooser = next((item for item in pending
-                            if item.get("method") == "Page.fileChooserOpened"), None)
-            until = time.monotonic() + 8
-            while chooser is None and time.monotonic() < until:
-                item = json.loads(ws.recv())
-                pending.append(item)
-                if item.get("method") == "Page.fileChooserOpened":
-                    chooser = item
-            if not chooser or not chooser.get("params", {}).get("backendNodeId"):
-                raise BrowserError("Pippit did not open the expected file chooser")
-            command("DOM.setFileInputFiles", {"files": [str(path.resolve())],
-                    "backendNodeId": chooser["params"]["backendNodeId"]})
+                if not menu_point:
+                    button_point = evaluate(r"""(()=>{let x=[...document.querySelectorAll('[aria-label]')]
+                      .find(x=>x.getAttribute('aria-label')==='\u4e0a\u4f20\u53c2\u8003\u7d20\u6750')
+                      || document.querySelector('button:has([data-slot="home-input-add-icon"])');
+                      let r=x?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()""")
+                    if not button_point:
+                        raise BrowserError("Pippit reference upload button is unavailable")
+                    click(button_point)
+                    time.sleep(.2)
+                    menu_point = evaluate("""(()=>{let x=document.querySelector('[role=menuitem]');
+                      let r=x?.getBoundingClientRect();return r?{x:r.x+r.width/2,y:r.y+r.height/2}:null})()""")
+                chooser = next((item for item in pending
+                                if item.get("method") == "Page.fileChooserOpened"), None)
+                if chooser is None and menu_point:
+                    click(menu_point)
+                if chooser is None and not menu_point:
+                    raise BrowserError("Pippit upload input and menu are unavailable")
+                until = time.monotonic() + 8
+                while chooser is None and time.monotonic() < until:
+                    item = json.loads(ws.recv())
+                    pending.append(item)
+                    if item.get("method") == "Page.fileChooserOpened":
+                        chooser = item
+                if not chooser or not chooser.get("params", {}).get("backendNodeId"):
+                    raise BrowserError("Pippit did not open the expected file chooser")
+                command("DOM.setFileInputFiles", {"files": [str(path.resolve())],
+                        "backendNodeId": chooser["params"]["backendNodeId"]})
             tracked: dict[str, str] = {}
             responses: dict[str, str] = {}
             until = time.monotonic() + 90
@@ -354,10 +369,11 @@ class CDPBrowser:
         except (OSError, websocket.WebSocketException) as exc:
             raise BrowserError(f"Pippit browser upload failed: {type(exc).__name__}") from exc
         finally:
-            try:
-                command("Page.setInterceptFileChooserDialog", {"enabled": False})
-            except Exception:
-                pass
+            if intercept_chooser:
+                try:
+                    command("Page.setInterceptFileChooserDialog", {"enabled": False})
+                except Exception:
+                    pass
             ws.close()
         if create_result is None:
             raise BrowserError("Pippit asset creation did not complete")
