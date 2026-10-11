@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import mimetypes
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -21,6 +23,18 @@ MIME_EXTENSIONS = {"audio/mpeg": ".mp3", "audio/wav": ".wav", "image/jpeg": ".jp
 
 class MediaError(Exception):
     pass
+
+
+def _allow_direct_media_fallback(host: str | None) -> bool:
+    """Keep browser/upstream and local URLs on the account proxy."""
+    if not host or host == "pippit.ai" or host.endswith(".pippit.ai"):
+        return False
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        return False
+    try:
+        return ipaddress.ip_address(host).is_global
+    except ValueError:
+        return "." in host
 
 
 def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, str]:
@@ -43,27 +57,48 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
         # Requests' socks5h form resolves the destination through the same
         # account proxy that Chromium uses for Pippit traffic.
         proxy = proxy_url.replace("socks5://", "socks5h://", 1)
-        session = requests.Session()
-        session.trust_env = False
-        try:
-            with session.get(source, timeout=120, stream=True,
-                             proxies={"http": proxy, "https": proxy},
-                             headers={"User-Agent": "Mozilla/5.0"}) as response:
-                response.raise_for_status()
-                chunks = []
-                total = 0
-                for chunk in response.iter_content(1024 * 1024):
-                    total += len(chunk)
-                    if total > MAX_MEDIA_BYTES:
-                        raise MediaError("reference media exceeds 200 MB")
-                    chunks.append(chunk)
-                data = b"".join(chunks)
-                mime = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].lower()
-                filename = Path(parsed.path).name or kind + MIME_EXTENSIONS.get(mime, ".bin")
-        except requests.RequestException as exc:
-            raise MediaError(f"media download failed through account proxy: {type(exc).__name__}") from exc
-        finally:
-            session.close()
+        account_route = {"http": proxy, "https": proxy}
+        routes = [("account proxy", account_route), ("account proxy", account_route)]
+        # Caller-owned public media can use a direct route if the account proxy
+        # repeatedly fails; Pippit and local hosts never use that route.
+        if _allow_direct_media_fallback(parsed.hostname):
+            routes.append(("direct media fallback", {}))
+        for index, (route_name, route_proxy) in enumerate(routes):
+            session = requests.Session()
+            session.trust_env = False
+            try:
+                with session.get(source, timeout=(20, 120), stream=True,
+                                 proxies=route_proxy,
+                                 allow_redirects=bool(route_proxy),
+                                 headers={"User-Agent": "Mozilla/5.0"}) as response:
+                    if not route_proxy and 300 <= response.status_code < 400:
+                        raise MediaError("direct media fallback redirected; account proxy is required")
+                    response.raise_for_status()
+                    chunks = []
+                    total = 0
+                    for chunk in response.iter_content(1024 * 1024):
+                        total += len(chunk)
+                        if total > MAX_MEDIA_BYTES:
+                            raise MediaError("reference media exceeds 200 MB")
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
+                    mime = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].lower()
+                    filename = Path(parsed.path).name or kind + MIME_EXTENSIONS.get(mime, ".bin")
+                    break
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError) as exc:
+                if index == len(routes) - 1:
+                    raise MediaError(f"media download failed via {route_name}: {type(exc).__name__}") from exc
+                time.sleep(0.5 * (index + 1))
+            except requests.exceptions.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else 0
+                if status not in {429, 500, 502, 503, 504} or index == len(routes) - 1:
+                    raise MediaError(f"media download failed via {route_name}: HTTP {status}") from exc
+                time.sleep(0.5 * (index + 1))
+            except requests.RequestException as exc:
+                raise MediaError(f"media download failed via {route_name}: {type(exc).__name__}") from exc
+            finally:
+                session.close()
     else:
         raise MediaError("media must be an HTTPS URL, HTTP URL, data URL, or Pippit asset ID")
     if not data:
