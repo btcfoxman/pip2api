@@ -25,6 +25,10 @@ class PippitError(Exception):
     pass
 
 
+class PippitAssetMismatch(PippitError):
+    """The upstream asset record belongs to a different uploaded file."""
+
+
 def _uuid() -> str:
     return str(uuid.uuid4())
 
@@ -215,11 +219,11 @@ class PippitClient:
                                                       browser=self.browser)
                         try:
                             reference = self._query_asset_ref(uploaded, kind, project_id)
-                        except PippitError as exc:
+                        except PippitAssetMismatch:
                             # An old upload's asynchronous registration can
                             # arrive while the next file is being watched.
-                            # Never bind an image asset as a video reference.
-                            if "asset type mismatch" in str(exc) and attempt == 0:
+                            # Never bind a different file to this media slot.
+                            if attempt == 0:
                                 continue
                             raise
                         self.store.media_cache_put(account_id, kind, digest, uploaded)
@@ -241,7 +245,15 @@ class PippitClient:
         record = matches[0]
         expected_type = {"images": 1, "videos": 2, "audios": 3}[kind]
         if str(record.get("AssetType")) != str(expected_type):
-            raise PippitError(f"Pippit asset type mismatch: expected {kind} asset")
+            raise PippitAssetMismatch(f"Pippit asset type mismatch: expected {kind} asset")
+        if kind == "images":
+            image_metadata = (record.get("Image") or {}).get("metadata") or {}
+            size = image_metadata.get("size")
+            if size and uploaded.get("bytes") and int(size) != int(uploaded["bytes"]):
+                raise PippitAssetMismatch("Pippit asset content mismatch: image size differs")
+            upstream_md5 = str(image_metadata.get("md5") or "").lower()
+            if upstream_md5 and uploaded.get("md5") and upstream_md5 != uploaded["md5"]:
+                raise PippitAssetMismatch("Pippit asset content mismatch: image checksum differs")
         base = {"asset_id": str(record.get("SourceID") or uploaded.get("asset_id") or ""),
                 "pippit_asset_id": asset_id}
         if kind == "images":

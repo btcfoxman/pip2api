@@ -6,7 +6,7 @@ Captured from the logged-in `pip-1` Chromium session on 2026-10-11. The capture 
 
 1. The browser's native file input uploads image, video and audio media. The observed chain is `/lv/v1/asset/prepare_upload_cloud`, cloud transfer, `/lv/v1/asset/create_cloud_asset`, and `/api/biz/v3/asset/create_v2`.
    If cloud upload responses arrive but the browser never reaches asset registration, the media upload is retried once with a fresh file input path. This retry occurs before any video submission.
-2. `/api/biz/v1/asset/query` confirms the new Pippit asset ID and returns the media record used to build the direct tool references.
+2. `/api/biz/v1/asset/query` confirms the new Pippit asset ID and returns the media record used to build the direct tool references. The service verifies the returned asset type, and for images also verifies available file size and checksum, before caching or submitting it. This catches late registration responses from a different upload.
 3. `/api/biz/v1/agent/submit_run` submits `biz/x_tool_name_video_part` to `pippit_video_part_agent`. The `message.content[].data` value is JSON text containing a `param` value that is also JSON text. The outer `run_extra` value **must be JSON text**, not an object. Sending it as an object was reproducibly rejected with `ret=-3: bad request`; changing only this encoding allowed submission with the previously successful browser media.
 4. `/api/biz/v1/agent/get_run` polls with `run_id`, `thread_id` and `scopes:["all"]`. State `3` is complete. The final artifact's `video.download_url` is the preferred result URL.
 5. `/commerce/v1/benefits/user_credit` reports account credit buckets. `/commerce/v1/benefits/credit_receive` is the optional daily claim.
@@ -15,7 +15,7 @@ The browser's successful direct tool request sent explicit `model`, `duration_se
 
 When a fixed ratio and video reference are present, PIP2API adds a short reference-generation instruction to the prompt while keeping the structured parameters unchanged. This addresses the provider's tendency to classify some prompts as video editing, which rejects explicit output ratio and duration. It does not override a provider-side rejection.
 
-Caller-owned public media are first fetched through the account proxy. If the same public host required a successful direct fallback, subsequent downloads from that host use the direct route for two minutes; Pippit domains and private hosts always remain on the account proxy.
+Caller-owned public media are fetched through the account proxy with a direct fallback. The observed public `media.juxingdonghua.com` source uses direct first because its proxy route repeatedly timed out while direct succeeded; direct failures still fall back to the account proxy. Other public hosts use direct first for two minutes after a successful direct fallback. Pippit domains and private hosts always remain on the account proxy.
 
 Credit deltas are used as per-task cost observations only when no other task on that account overlaps the observation window. Concurrent tasks can share the same starting balance, so their deltas are not reliable per-task prices.
 

@@ -75,3 +75,41 @@ def test_wrong_cached_video_asset_is_replaced_after_a_fresh_upload(tmp_path, mon
     assert len(uploads) == 2
     assert assets["videos"][0]["pippit_asset_id"] == "correct-video"
     assert store.media_cache_get(1, "videos", digest)["pippit_asset_id"] == "correct-video"
+
+
+def test_wrong_image_content_is_not_reused_or_cached(tmp_path, monkeypatch):
+    import hashlib
+
+    store = Store(str(tmp_path / "pip.db"))
+    account = {"id": 1, "cdp_port": 19301, "proxy_url": "socks5://example.com:20001",
+               "project_id": "123"}
+    data = b"image-a"
+    digest = hashlib.sha256(data).hexdigest()
+    store.media_cache_put(1, "images", digest,
+                          {"pippit_asset_id": "wrong-image", "mime": "image/png", "bytes": len(data)})
+    uploads = []
+
+    class Browser:
+        def __init__(self, _port):
+            pass
+
+        def post(self, _path, body):
+            asset_id = body["pippit_asset_ids"][0]
+            return {"Assets": [{"PippitAssetID": asset_id, "SourceID": "source-1",
+                                "AssetType": 1, "Name": "image.png",
+                                "Image": {"metadata": {"size": len(data) if asset_id == "right-image" else 100}}}]}
+
+    monkeypatch.setattr("app.client.CDPBrowser", Browser)
+    monkeypatch.setattr("app.client._download", lambda *_: (data, "image/png", "image.png"))
+
+    def upload(*_args, **_kwargs):
+        uploads.append(True)
+        return {"pippit_asset_id": "wrong-image" if len(uploads) == 1 else "right-image",
+                "mime": "image/png", "bytes": len(data)}
+
+    monkeypatch.setattr("app.client.upload_media_bytes", upload)
+    assets = PippitClient(account, store=store).upload_inputs(
+        {"images": ["https://example.com/image.png"], "videos": [], "audios": []})
+    assert len(uploads) == 2
+    assert assets["images"][0]["pippit_asset_id"] == "right-image"
+    assert store.media_cache_get(1, "images", digest)["pippit_asset_id"] == "right-image"

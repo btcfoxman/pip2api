@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import mimetypes
 import struct
@@ -225,4 +226,4 @@ def upload_media_bytes(data: bytes, mime: str, filename: str, kind: str, *,
         raise MediaError("Pippit web upload returned no PippitAssetID")
     return {"pippit_asset_id": asset_id,
             "asset_id": result.get("SourceID") or result.get("asset_id") or "",
-            "mime": mime, "bytes": len(data)}
+            "mime": mime, "bytes": len(data), "md5": hashlib.md5(data).hexdigest()}
