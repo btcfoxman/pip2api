@@ -161,10 +161,20 @@ class Service:
         if not browser_alive(port):
             return self.store.update_account(account_id, {"status": "login_required",
                                                          "last_error": "Pippit account browser is unavailable"})
-        try:
-            state = PippitClient(account).account_state()
-        except BrowserError as exc:
-            return self.store.update_account(account_id, {"status": "login_required", "last_error": str(exc)[:300]})
+        # Chrome exposes a CDP page before Pippit's JavaScript has finished
+        # loading. After a service restart, one early fetch failure should not
+        # put an otherwise valid account into login_required for an entire
+        # maintenance interval. Complete HTTP rejections still fail promptly.
+        for attempt in range(3):
+            try:
+                state = PippitClient(account).account_state()
+                break
+            except BrowserRejected as exc:
+                return self.store.update_account(account_id, {"status": "login_required", "last_error": str(exc)[:300]})
+            except BrowserError as exc:
+                if attempt == 2:
+                    return self.store.update_account(account_id, {"status": "login_required", "last_error": str(exc)[:300]})
+                time.sleep(1)
         balance = state["available_balance"]
         project_id = PippitClient(account).browser.project_id()
         threshold = float(self.settings()["low_balance_disable_threshold"] or 0)
