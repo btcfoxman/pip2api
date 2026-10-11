@@ -15,6 +15,8 @@ The browser's successful direct tool request sent explicit `model`, `duration_se
 
 When a fixed ratio and video reference are present, PIP2API adds a short reference-generation instruction to the prompt while keeping the structured parameters unchanged. This addresses the provider's tendency to classify some prompts as video editing, which rejects explicit output ratio and duration. It does not override a provider-side rejection.
 
+Caller-owned public media are first fetched through the account proxy. If the same public host required a successful direct fallback, subsequent downloads from that host use the direct route for two minutes; Pippit domains and private hosts always remain on the account proxy.
+
 ## Live acceptance
 
 - Public API task: `pip_67e81942ec654b91`

@@ -7,6 +7,7 @@ import ipaddress
 import mimetypes
 import struct
 import tempfile
+import threading
 import time
 import uuid
 import zlib
@@ -22,6 +23,8 @@ from .browser import BrowserError, BrowserRejected, CDPBrowser
 MAX_MEDIA_BYTES = 200 * 1024 * 1024
 MIME_EXTENSIONS = {"audio/mpeg": ".mp3", "audio/wav": ".wav", "image/jpeg": ".jpg",
                    "image/png": ".png", "video/mp4": ".mp4", "video/quicktime": ".mov"}
+_MEDIA_ROUTE_LOCK = threading.RLock()
+_DIRECT_MEDIA_UNTIL: dict[str, float] = {}
 
 
 class MediaError(Exception):
@@ -87,13 +90,17 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
         routes = [("account proxy", account_route), ("account proxy", account_route)]
         # Caller-owned public media can use a direct route if the account proxy
         # repeatedly fails; Pippit and local hosts never use that route.
-        if _allow_direct_media_fallback(parsed.hostname):
-            routes.append(("direct media fallback", {}))
+        direct_allowed = _allow_direct_media_fallback(parsed.hostname)
+        if direct_allowed:
+            with _MEDIA_ROUTE_LOCK:
+                direct_first = _DIRECT_MEDIA_UNTIL.get(parsed.hostname, 0) > time.monotonic()
+            direct_route = ("direct media fallback", {})
+            routes = ([direct_route] + routes) if direct_first else (routes + [direct_route])
         for index, (route_name, route_proxy) in enumerate(routes):
             session = requests.Session()
             session.trust_env = False
             try:
-                with session.get(source, timeout=(20, 120), stream=True,
+                with session.get(source, timeout=(10, 45) if route_proxy else (10, 60), stream=True,
                                  proxies=route_proxy,
                                  allow_redirects=bool(route_proxy),
                                  headers={"User-Agent": "Mozilla/5.0"}) as response:
@@ -110,6 +117,12 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
                     data = b"".join(chunks)
                     mime = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].lower()
                     filename = Path(parsed.path).name or kind + MIME_EXTENSIONS.get(mime, ".bin")
+                    if direct_allowed:
+                        with _MEDIA_ROUTE_LOCK:
+                            if route_proxy:
+                                _DIRECT_MEDIA_UNTIL.pop(parsed.hostname, None)
+                            else:
+                                _DIRECT_MEDIA_UNTIL[parsed.hostname] = time.monotonic() + 120
                     break
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
                     requests.exceptions.ChunkedEncodingError) as exc:

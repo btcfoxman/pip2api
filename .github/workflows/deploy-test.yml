@@ -70,6 +70,36 @@ jobs:
           test -f "$DEPLOY_PATH/.env"
           cp docker-compose.yml "$DEPLOY_PATH/docker-compose.yml"
           docker network inspect my-shared-net >/dev/null 2>&1 || docker network create my-shared-net
+      - name: Wait for in-flight video tasks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(docker inspect -f '{{.State.Running}}' "$DEPLOY_SERVICE" 2>/dev/null || true)" != true ]; then
+            exit 0
+          fi
+          active_tasks() {
+            docker exec -i "$DEPLOY_SERVICE" python - <<'PY'
+          import sqlite3
+          db = sqlite3.connect('file:/app/data/pip2api.db?mode=ro', uri=True, timeout=10)
+          print(db.execute("SELECT COUNT(*) FROM tasks WHERE status IN ('queued','preparing','submitted','running')").fetchone()[0])
+          PY
+          }
+          deadline=$((SECONDS + 1200))
+          while true; do
+            active="$(active_tasks)"
+            echo "PIP2API active tasks: $active"
+            if [ "$active" -eq 0 ]; then
+              sleep 20
+              if [ "$(active_tasks)" -eq 0 ]; then
+                break
+              fi
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "Refusing to restart PIP2API while tasks are active"
+              exit 1
+            fi
+            sleep 15
+          done
       - name: Pull and start
         shell: bash
         run: |

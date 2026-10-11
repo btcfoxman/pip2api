@@ -2,7 +2,7 @@ import pytest
 import requests
 
 from app.browser import BrowserError, _remove_stale_profile_locks, start_managed_browser
-from app.media import MediaError, _download
+from app.media import MediaError, _DIRECT_MEDIA_UNTIL, _download
 
 
 def test_managed_browser_requires_account_proxy(tmp_path):
@@ -63,6 +63,7 @@ def test_media_download_uses_account_proxy_only(monkeypatch):
 
 def test_public_caller_media_falls_back_to_direct_after_proxy_tls_failures(monkeypatch):
     routes = []
+    _DIRECT_MEDIA_UNTIL.clear()
     monkeypatch.setattr("app.media.time.sleep", lambda _: None)
 
     class Response:
@@ -102,6 +103,11 @@ def test_public_caller_media_falls_back_to_direct_after_proxy_tls_failures(monke
          "https": "socks5h://host.docker.internal:20001"},
         {},
     ]
+    _download("https://media.juxingdonghua.com/next.png", "images",
+              "socks5://host.docker.internal:20001")
+    assert routes[-1] == {}
+    assert len(routes) == 4
+    _DIRECT_MEDIA_UNTIL.clear()
 
 
 def test_pippit_media_does_not_bypass_account_proxy(monkeypatch):
