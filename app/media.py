@@ -59,6 +59,32 @@ def _unique_image_copy(data: bytes, mime: str) -> bytes | None:
     return None
 
 
+def _unique_mp4_copy(data: bytes, mime: str) -> bytes | None:
+    """Change the file identity without changing MP4 video or audio samples."""
+    if mime not in {"video/mp4", "video/quicktime"}:
+        return None
+    position = 0
+    found_ftyp = False
+    found_mdat = False
+    while position + 8 <= len(data):
+        size, kind = struct.unpack_from(">I4s", data, position)
+        header_size = 8
+        if size == 1:
+            if position + 16 > len(data):
+                return None
+            size = struct.unpack_from(">Q", data, position + 8)[0]
+            header_size = 16
+        if size < header_size or position + size > len(data):
+            return None
+        found_ftyp |= kind == b"ftyp"
+        found_mdat |= kind == b"mdat"
+        position += size
+    if position != len(data) or not found_ftyp or not found_mdat:
+        return None
+    marker = b"pip2api-upload-" + uuid.uuid4().hex.encode("ascii")
+    return data + struct.pack(">I4s", 8 + len(marker), b"free") + marker
+
+
 def _allow_direct_media_fallback(host: str | None) -> bool:
     """Keep browser/upstream and local URLs on the account proxy."""
     if not host or host == "pippit.ai" or host.endswith(".pippit.ai"):
@@ -201,9 +227,10 @@ def upload_media_bytes(data: bytes, mime: str, filename: str, kind: str, *,
                     result = browser.upload_file(path)
                     break
                 except BrowserRejected as exc:
-                    if kind != "images" or "ret=1" not in str(exc) or unique_retry:
+                    if "ret=1" not in str(exc) or unique_retry:
                         raise
-                    variant = _unique_image_copy(data, mime)
+                    variant = (_unique_image_copy(data, mime) if kind == "images"
+                               else _unique_mp4_copy(data, mime) if kind == "videos" else None)
                     if variant is None:
                         raise
                     data = variant

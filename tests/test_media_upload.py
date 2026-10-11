@@ -2,7 +2,7 @@ import struct
 import zlib
 
 from app.browser import BrowserError, BrowserRejected
-from app.media import _unique_image_copy, upload_media_bytes
+from app.media import _unique_image_copy, _unique_mp4_copy, upload_media_bytes
 
 
 def _chunk(name: bytes, body: bytes) -> bytes:
@@ -41,6 +41,27 @@ def test_duplicate_png_retry_keeps_pixels_and_existing_metadata():
 
 def test_unrecognized_image_is_not_rewritten():
     assert _unique_image_copy(b"unknown", "image/png") is None
+
+
+def test_duplicate_mp4_retry_preserves_existing_boxes_and_samples():
+    original = (struct.pack(">I4s", 12, b"ftyp") + b"isom"
+                + struct.pack(">I4s", 12, b"mdat") + b"data")
+    observed = []
+
+    class Browser:
+        def upload_file(self, path):
+            observed.append(path.read_bytes())
+            if len(observed) == 1:
+                raise BrowserRejected("Pippit ret=1: Something went wrong. Try again.")
+            return {"PippitAssetID": "video-test"}
+
+    result = upload_media_bytes(original, "video/mp4", "input.mp4", "videos", browser=Browser())
+    assert observed[0] == original
+    assert observed[1].startswith(original)
+    assert observed[1][len(original) + 4:len(original) + 8] == b"free"
+    assert result["bytes"] == len(observed[1])
+    assert result["pippit_asset_id"] == "video-test"
+    assert _unique_mp4_copy(b"not an mp4", "video/mp4") is None
 
 
 def test_incomplete_asset_registration_retries_once_with_a_fresh_input_path():
