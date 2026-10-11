@@ -41,7 +41,7 @@ MODELS = {
 }
 
 RATIOS = {"adaptive", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"}
-ALIASES = re.compile(r"(?<![\w@<])(?P<kind>视频|video|v|视|图片|image|img|图|音频|audio|音)\s*(?P<index>\d+)(?!\w)", re.I)
+ALIASES = re.compile(r"(?<![\w<])(?P<explicit>@)?(?P<kind>视频|video|v|视|图片|image|img|图|音频|audio|音)\s*(?P<index>\d+)(?!\w)", re.I)
 
 
 def _media_list(body: dict[str, Any], singular: str, plural: str) -> list[str]:
@@ -76,6 +76,10 @@ def prompt_references(prompt: str, media: dict[str, list[str]]) -> list[tuple[st
     for match in ALIASES.finditer(prompt):
         kind = media_alias_kind(match.group("kind"))
         index = int(match.group("index"))
+        # A bare label can also name an output section (for example, 【视频 6】).
+        # With no input of that kind it cannot refer to an uploaded asset.
+        if not media[kind] and not match.group("explicit"):
+            continue
         if index < 1 or index > len(media[kind]):
             raise ValueError(f"prompt references {match.group(0)} but only {len(media[kind])} {kind} were provided")
         found.append((kind, index))
@@ -87,6 +91,8 @@ def bind_prompt(prompt: str, asset_ids: dict[str, list[str]]) -> str:
     def replace(match: re.Match[str]) -> str:
         kind = media_alias_kind(match.group("kind"))
         index = int(match.group("index"))
+        if not asset_ids[kind] and not match.group("explicit"):
+            return match.group(0)
         if not 1 <= index <= len(asset_ids[kind]):
             raise ValueError(f"unbound media reference: {match.group(0)}")
         return f"<pippit-asset-id>{asset_ids[kind][index - 1]}</pippit-asset-id>"

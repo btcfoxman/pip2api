@@ -34,6 +34,25 @@ def test_prompt_references_bind_to_correct_media():
         normalize_request({"prompt": "图2", "image_urls": ["pippit:image"]})
 
 
+def test_output_video_number_is_not_an_input_reference_without_videos():
+    request = normalize_request({
+        "model": "sd-2-5", "prompt": "【视频 6】参考 图片1 制作一个片段",
+        "image_urls": ["pippit:image"],
+    })
+    assert bind_prompt(request["prompt"], {
+        "images": ["image"], "videos": [], "audios": [],
+    }) == "【视频 6】参考 <pippit-asset-id>image</pippit-asset-id> 制作一个片段"
+
+
+def test_explicit_missing_reference_is_rejected_and_bound_when_present():
+    with pytest.raises(ValueError, match="only 0 videos"):
+        normalize_request({"prompt": "参考 @视频6"})
+    request = normalize_request({"prompt": "参考 @video1", "video_urls": ["pippit:clip"]})
+    assert bind_prompt(request["prompt"], {
+        "images": [], "videos": ["clip"], "audios": [],
+    }) == "参考 <pippit-asset-id>clip</pippit-asset-id>"
+
+
 def test_direct_tool_submit_envelope_and_final_video_selection():
     request = normalize_request({"model": "sd-2-0-mini-480p", "duration": 4,
         "prompt": "A blue bird", "image_urls": ["pippit:image"],
