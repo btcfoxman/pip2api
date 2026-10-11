@@ -25,6 +25,10 @@ MIME_EXTENSIONS = {"audio/mpeg": ".mp3", "audio/wav": ".wav", "image/jpeg": ".jp
                    "image/png": ".png", "video/mp4": ".mp4", "video/quicktime": ".mov"}
 _MEDIA_ROUTE_LOCK = threading.RLock()
 _DIRECT_MEDIA_UNTIL: dict[str, float] = {}
+# This caller-owned public media host consistently fails TLS through the
+# account proxy on pre, while its direct route succeeds. Pippit hosts never
+# enter this list and always use the account proxy.
+_DIRECT_FIRST_MEDIA_HOSTS = frozenset({"media.juxingdonghua.com"})
 
 
 class MediaError(Exception):
@@ -94,7 +98,8 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
         direct_first = False
         if direct_allowed:
             with _MEDIA_ROUTE_LOCK:
-                direct_first = _DIRECT_MEDIA_UNTIL.get(parsed.hostname, 0) > time.monotonic()
+                direct_first = (parsed.hostname in _DIRECT_FIRST_MEDIA_HOSTS or
+                                _DIRECT_MEDIA_UNTIL.get(parsed.hostname, 0) > time.monotonic())
             direct_route = ("direct media fallback", {})
             routes = ([direct_route] + routes) if direct_first else (routes + [direct_route])
         for index, (route_name, route_proxy) in enumerate(routes):

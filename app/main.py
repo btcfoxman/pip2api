@@ -351,7 +351,11 @@ def model_costs() -> list[dict[str, Any]]:
 
 @app.get("/api/tasks", dependencies=[Depends(admin_auth)])
 def admin_tasks(limit: int = 100) -> list[dict[str, Any]]:
-    return store.tasks(max(1, min(limit, 10000)))
+    tasks = store.tasks(max(1, min(limit, 10000)))
+    for task in tasks:
+        if task["status"] in {"failed", "expired"}:
+            task["public_error"] = service.public_task(task)["error"]
+    return tasks
 
 
 @app.post("/api/tasks", dependencies=[Depends(admin_auth)])
@@ -361,7 +365,10 @@ def admin_create_task(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
 
 @app.get("/api/tasks/{task_id}", dependencies=[Depends(admin_auth)])
 def admin_task(task_id: str) -> dict[str, Any]:
-    return _task(task_id)
+    task = _task(task_id)
+    if task["status"] in {"failed", "expired"}:
+        task["public_error"] = service.public_task(task)["error"]
+    return task
 
 
 @app.delete("/api/tasks", dependencies=[Depends(admin_auth)])

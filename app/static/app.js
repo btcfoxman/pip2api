@@ -23,6 +23,7 @@ function elapsed(task) { const end = Number(task.completed_at || Date.now() / 10
 function badge(status) { const labels = { active: "可用", pending: "待检测", login_pending: "待登录", logging_in: "登录中", login_failed: "登录失败", challenge_required: "需验证", profile_resetting: "重置中", queued: "排队", preparing: "准备", submitted: "已提交", running: "生成中", succeeded: "完成", failed: "失败", expired: "超时", login_required: "需登录", network_error: "网络异常", suspended: "上游封禁", disabled: "禁用", disabled_low_balance: "低额度" }; return `<span class="badge ${escapeHtml(status)}">${escapeHtml(labels[status] || status || "未知")}</span>`; }
 function proxyLabel(value) { try { const url = new URL(value); return `${url.hostname}:${url.port}`; } catch { return value || "直连"; } }
 function failureMessage(task) {
+  if (task.public_error?.message) return task.public_error.message;
   if (task.error_code === "VIDEO_EDIT_CONSTRAINT") return "参考视频被识别为编辑任务，所选时长或画幅与原视频不兼容；请明确要求参考生成，或使用自适应画幅。";
   if (task.error_code === "UPSTREAM_TEMPORARY") return "上游视频生成暂时失败，请稍后重试。";
   if (/content (?:was flagged by our moderation system|violates safety rules)/i.test(task.error_message || "")) return publicErrors.CONTENT_MODERATION_FAILED;

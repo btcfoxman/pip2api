@@ -94,7 +94,7 @@ def test_public_caller_media_falls_back_to_direct_after_proxy_tls_failures(monke
             pass
 
     monkeypatch.setattr("app.media.requests.Session", Session)
-    data, _, _ = _download("https://media.juxingdonghua.com/input.png", "images",
+    data, _, _ = _download("https://fallback-test.example/input.png", "images",
                            "socks5://host.docker.internal:20001")
     assert data == b"png"
     assert routes == [
@@ -104,11 +104,45 @@ def test_public_caller_media_falls_back_to_direct_after_proxy_tls_failures(monke
          "https": "socks5h://host.docker.internal:20001"},
         {},
     ]
-    _download("https://media.juxingdonghua.com/next.png", "images",
+    _download("https://fallback-test.example/next.png", "images",
               "socks5://host.docker.internal:20001")
     assert routes[-1] == {}
     assert len(routes) == 4
     _DIRECT_MEDIA_UNTIL.clear()
+
+
+def test_known_caller_media_host_uses_direct_first(monkeypatch):
+    routes = []
+
+    class Response:
+        headers = {"Content-Type": "image/png"}
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, *_):
+            yield b"png"
+
+    class Session:
+        def get(self, _url, **kwargs):
+            routes.append(kwargs["proxies"])
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("app.media.requests.Session", Session)
+    data, _, _ = _download("https://media.juxingdonghua.com/input.png", "images",
+                           "socks5://host.docker.internal:20001")
+    assert data == b"png"
+    assert routes == [{}]
 
 
 def test_pippit_media_does_not_bypass_account_proxy(monkeypatch):

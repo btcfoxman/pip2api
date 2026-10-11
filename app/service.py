@@ -15,6 +15,7 @@ from typing import Any
 from .browser import BrowserError, BrowserRejected, browser_alive, start_managed_browser, stop_managed_browser
 from .catalog import normalize_request
 from .client import PippitClient, PippitError
+from .errors import public_error
 from .media import MediaError
 from .store import Store
 
@@ -341,5 +342,5 @@ class Service:
                   "data": [{"url": url} for url in task["result_urls"]],
                   "account_id": task.get("account_id")}
         if task["status"] in {"failed", "expired"}:
-            result["error"] = {"code": task["error_code"], "message": task["error_message"]}
+            result["error"] = public_error(task["error_code"], task["error_message"])
         return result
