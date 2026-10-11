@@ -266,6 +266,7 @@ class CDPBrowser:
 
         def command(method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
             nonlocal sequence
+            ws.settimeout(90)
             sequence += 1
             current = sequence
             ws.send(json.dumps({"id": current, "method": method, "params": params or {}}))
@@ -306,6 +307,8 @@ class CDPBrowser:
 
         create_body: dict[str, Any] | None = None
         create_result: dict[str, Any] | None = None
+        upload_phases = {"prepare": 0, "chunks": 0, "cloud_asset": 0, "registration": 0,
+                         "network_failed": 0}
         intercept_chooser = False
         try:
             command("Page.enable")
@@ -355,10 +358,16 @@ class CDPBrowser:
                 command("DOM.setFileInputFiles", {"files": [str(path.resolve())],
                         "backendNodeId": chooser["params"]["backendNodeId"]})
             tracked: dict[str, str] = {}
-            responses: dict[str, str] = {}
             until = time.monotonic() + 90
             while time.monotonic() < until and create_result is None:
-                item = pending.popleft() if pending else json.loads(ws.recv())
+                if pending:
+                    item = pending.popleft()
+                else:
+                    ws.settimeout(min(5, max(0.1, until - time.monotonic())))
+                    try:
+                        item = json.loads(ws.recv())
+                    except websocket.WebSocketTimeoutException:
+                        continue
                 method = item.get("method")
                 params = item.get("params") or {}
                 request_id = str(params.get("requestId") or "")
@@ -374,8 +383,17 @@ class CDPBrowser:
                                 pass
                 elif method == "Network.responseReceived":
                     route = urllib.parse.urlsplit(str((params.get("response") or {}).get("url") or "")).path
+                    if route.endswith("/asset/prepare_upload_cloud"):
+                        upload_phases["prepare"] += 1
+                    elif route.startswith("/upload/v1/"):
+                        upload_phases["chunks"] += 1
+                    elif route.endswith("/asset/create_cloud_asset"):
+                        upload_phases["cloud_asset"] += 1
                     if route.endswith("/asset/create_v2"):
+                        upload_phases["registration"] += 1
                         tracked[request_id] = route
+                elif method == "Network.loadingFailed":
+                    upload_phases["network_failed"] += 1
                 elif method == "Network.loadingFinished" and request_id in tracked:
                     result = command("Network.getResponseBody", {"requestId": request_id})
                     raw = result.get("body") or "{}"
@@ -401,7 +419,8 @@ class CDPBrowser:
                     pass
             ws.close()
         if create_result is None:
-            raise BrowserError("Pippit asset creation did not complete")
+            phases = ", ".join(f"{key}={value}" for key, value in upload_phases.items())
+            raise BrowserError(f"Pippit asset creation did not complete ({phases})")
         if str(create_result.get("ret")) != "0" and create_body:
             # This registration RPC is idempotent by source asset ID.
             return self.post("/api/biz/v3/asset/create_v2", create_body)

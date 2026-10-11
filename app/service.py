@@ -289,7 +289,17 @@ class Service:
                     "completed_at": time.time()})
                 return
             if state["status"] == "failed":
-                self._fail(task_id, "UPSTREAM_FAILED", state["error"] or "Pippit video generation failed")
+                reason = state["error"] or "Pippit video generation failed"
+                upstream_code = state.get("error_code") or ""
+                if upstream_code in {"12009", "12011"}:
+                    code = "CONTENT_MODERATION_FAILED"
+                elif "video editing task" in reason.lower():
+                    code = "VIDEO_EDIT_CONSTRAINT"
+                elif upstream_code == "99999":
+                    code = "UPSTREAM_TEMPORARY"
+                else:
+                    code = "UPSTREAM_FAILED"
+                self._fail(task_id, code, reason)
                 return
             self.store.update_task(task_id, {"status": "running", "progress": max(45, task["progress"])})
             time.sleep(max(2, int(self.settings()["poll_interval_seconds"])))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ast
 import hashlib
 import os
 import threading
@@ -36,8 +37,18 @@ def _asset_ref(item: dict[str, Any]) -> dict[str, Any]:
 def build_video_param(normalized: dict[str, Any], assets: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     ids = {kind: [str(item["pippit_asset_id"]) for item in assets[kind]]
            for kind in ("images", "videos", "audios")}
+    prompt = bind_prompt(normalized["prompt"], ids)
+    if ids["videos"] and normalized["aspect_ratio"] != "adaptive":
+        # The agent may otherwise interpret a reference clip as a video-editing
+        # request, for which Pippit rejects an explicitly requested ratio and
+        # duration. Keep the caller's structured settings authoritative.
+        prompt += ("\n\n参考视频仅作画面与动作参考；这是生成一条全新视频的任务，"
+                   "不要剪辑或修改参考视频，也不要沿用参考视频的时长或画幅。"
+                   f"最终只生成一条视频，模型 {normalized['upstream_model']}，"
+                   f"时长 {normalized['duration']} 秒，分辨率 {normalized['resolution']}，"
+                   f"画幅 {normalized['aspect_ratio']}。")
     result: dict[str, Any] = {
-        "prompt": bind_prompt(normalized["prompt"], ids),
+        "prompt": prompt,
         "images": [_asset_ref(item) for item in assets["images"]],
         "videos": [_asset_ref(item) for item in assets["videos"]],
         "audios": [_asset_ref(item) for item in assets["audios"]],
@@ -139,6 +150,22 @@ def extract_result_urls(run: dict[str, Any]) -> list[str]:
             if container:
                 _walk_urls(container, result)
     return result
+
+
+def extract_failure(run: dict[str, Any]) -> tuple[str, str]:
+    reason = run.get("fail_reason")
+    if isinstance(reason, str) and reason.startswith("{"):
+        for decode in (json.loads, ast.literal_eval):
+            try:
+                reason = decode(reason)
+                break
+            except (ValueError, SyntaxError):
+                continue
+    if isinstance(reason, dict):
+        code = str(reason.get("code") or "")
+        message = str(reason.get("detail") or reason.get("message") or "")
+        return code, message[:500]
+    return "", str(reason or "")[:500]
 
 
 class PippitClient:
@@ -253,6 +280,7 @@ class PippitClient:
             raise PippitError("Pippit get_run response has no run")
         state = str(run.get("state") or "")
         status = {"3": "succeeded", "4": "failed", "5": "failed", "9": "failed"}.get(state, "running")
+        error_code, error = extract_failure(run)
         return {"status": status, "state": state,
                 "result_urls": extract_result_urls(run),
-                "error": str(run.get("fail_reason") or "")[:500]}
+                "error_code": error_code, "error": error}

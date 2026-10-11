@@ -157,17 +157,31 @@ def upload_media_bytes(data: bytes, mime: str, filename: str, kind: str, *,
         with tempfile.TemporaryDirectory(prefix="pip2api-media-") as root:
             path = Path(root) / (kind + suffix)
             path.write_bytes(data)
-            try:
-                result = browser.upload_file(path)
-            except BrowserRejected as exc:
-                if kind != "images" or "ret=1" not in str(exc):
-                    raise
-                variant = _unique_image_copy(data, mime)
-                if variant is None:
-                    raise
-                path.write_bytes(variant)
-                result = browser.upload_file(path)
-                data = variant
+            incomplete_retries = 0
+            unique_retry = False
+            while True:
+                try:
+                    result = browser.upload_file(path)
+                    break
+                except BrowserRejected as exc:
+                    if kind != "images" or "ret=1" not in str(exc) or unique_retry:
+                        raise
+                    variant = _unique_image_copy(data, mime)
+                    if variant is None:
+                        raise
+                    data = variant
+                    unique_retry = True
+                    path = Path(root) / (kind + "-unique" + suffix)
+                    path.write_bytes(data)
+                except BrowserError as exc:
+                    # The browser sometimes completes cloud chunks without ever
+                    # calling asset/create_v2. No generation has been submitted;
+                    # retrying this media registration once cannot duplicate a video.
+                    if "asset creation did not complete" not in str(exc) or incomplete_retries:
+                        raise
+                    incomplete_retries += 1
+                    path = Path(root) / (kind + "-retry" + suffix)
+                    path.write_bytes(data)
     except BrowserError as exc:
         raise MediaError(f"Pippit web upload failed: {exc}") from exc
     asset_id = result.get("PippitAssetID") or result.get("pippit_asset_id")
