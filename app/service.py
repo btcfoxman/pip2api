@@ -82,18 +82,26 @@ class Service:
     def _maintain_accounts(self) -> None:
         while not self._stop.is_set():
             settings = self.settings()
+            needs_rapid_recheck = False
             for account in self.store.accounts(private=True):
                 if self._stop.is_set():
                     break
                 if not account["enabled"] or not int(account["cdp_port"] or 0):
                     continue
                 try:
-                    self.check_account(int(account["id"]))
-                    if settings["daily_checkin_enabled"]:
+                    checked = self.check_account(int(account["id"]))
+                    if checked["status"] == "login_required":
+                        needs_rapid_recheck = True
+                    if checked["status"] == "active" and settings["daily_checkin_enabled"]:
                         self.checkin_account(int(account["id"]))
                 except (BrowserError, ValueError, KeyError):
+                    needs_rapid_recheck = True
                     continue
-            self._stop.wait(max(30, int(settings["account_maintenance_interval_seconds"])))
+            interval = max(30, int(settings["account_maintenance_interval_seconds"]))
+            # A restarted Chrome often exposes its tab before the app can make
+            # authenticated requests. Retry that state promptly instead of
+            # leaving a valid account unavailable for the full interval.
+            self._stop.wait(min(15, interval) if needs_rapid_recheck else interval)
 
     def checkin_account(self, account_id: int) -> dict[str, Any]:
         account = self.store.account(account_id, private=True)
