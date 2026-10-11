@@ -1,5 +1,6 @@
 import pytest
 import requests
+import time
 
 from app.browser import BrowserError, _remove_stale_profile_locks, start_managed_browser
 from app.media import MediaError, _DIRECT_MEDIA_UNTIL, _download
@@ -128,6 +129,48 @@ def test_pippit_media_does_not_bypass_account_proxy(monkeypatch):
                   "socks5://host.docker.internal:20001")
     assert len(routes) == 2
     assert all(route["https"] == "socks5h://host.docker.internal:20001" for route in routes)
+
+
+def test_failed_direct_first_attempt_returns_to_account_proxy(monkeypatch):
+    host = "fallback-test.example"
+    _DIRECT_MEDIA_UNTIL[host] = time.monotonic() + 60
+    routes = []
+
+    class Response:
+        headers = {"Content-Type": "image/png"}
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, *_):
+            yield b"png"
+
+    class Session:
+        def get(self, _url, **kwargs):
+            routes.append(kwargs["proxies"])
+            if not kwargs["proxies"]:
+                failure = requests.Response()
+                failure.status_code = 403
+                raise requests.exceptions.HTTPError(response=failure)
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("app.media.requests.Session", Session)
+    data, _, _ = _download(f"https://{host}/input.png", "images",
+                           "socks5://host.docker.internal:20001")
+    assert data == b"png"
+    assert routes == [{}, {"http": "socks5h://host.docker.internal:20001",
+                            "https": "socks5h://host.docker.internal:20001"}]
+    assert host not in _DIRECT_MEDIA_UNTIL
 
 
 def test_private_media_host_does_not_use_direct_fallback():

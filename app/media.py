@@ -91,6 +91,7 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
         # Caller-owned public media can use a direct route if the account proxy
         # repeatedly fails; Pippit and local hosts never use that route.
         direct_allowed = _allow_direct_media_fallback(parsed.hostname)
+        direct_first = False
         if direct_allowed:
             with _MEDIA_ROUTE_LOCK:
                 direct_first = _DIRECT_MEDIA_UNTIL.get(parsed.hostname, 0) > time.monotonic()
@@ -126,16 +127,33 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
                     break
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
                     requests.exceptions.ChunkedEncodingError) as exc:
+                if direct_allowed and not route_proxy:
+                    with _MEDIA_ROUTE_LOCK:
+                        _DIRECT_MEDIA_UNTIL.pop(parsed.hostname, None)
                 if index == len(routes) - 1:
                     raise MediaError(f"media download failed via {route_name}: {type(exc).__name__}") from exc
                 time.sleep(0.5 * (index + 1))
             except requests.exceptions.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else 0
+                if direct_allowed and not route_proxy and index < len(routes) - 1:
+                    with _MEDIA_ROUTE_LOCK:
+                        _DIRECT_MEDIA_UNTIL.pop(parsed.hostname, None)
+                    continue
                 if status not in {429, 500, 502, 503, 504} or index == len(routes) - 1:
                     raise MediaError(f"media download failed via {route_name}: HTTP {status}") from exc
                 time.sleep(0.5 * (index + 1))
             except requests.RequestException as exc:
+                if direct_allowed and not route_proxy and index < len(routes) - 1:
+                    with _MEDIA_ROUTE_LOCK:
+                        _DIRECT_MEDIA_UNTIL.pop(parsed.hostname, None)
+                    continue
                 raise MediaError(f"media download failed via {route_name}: {type(exc).__name__}") from exc
+            except MediaError as exc:
+                if direct_first and "direct media fallback redirected" in str(exc):
+                    with _MEDIA_ROUTE_LOCK:
+                        _DIRECT_MEDIA_UNTIL.pop(parsed.hostname, None)
+                    continue
+                raise
             finally:
                 session.close()
     else:
