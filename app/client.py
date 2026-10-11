@@ -210,11 +210,21 @@ class PippitClient:
                             continue
                         except PippitError:
                             self.store.media_cache_delete(account_id, kind, digest)
-                    uploaded = upload_media_bytes(data, mime, filename, kind,
-                                                  browser=self.browser)
-                    reference = self._query_asset_ref(uploaded, kind, project_id)
-                    self.store.media_cache_put(account_id, kind, digest, uploaded)
-                    result[kind].append(reference)
+                    for attempt in range(2):
+                        uploaded = upload_media_bytes(data, mime, filename, kind,
+                                                      browser=self.browser)
+                        try:
+                            reference = self._query_asset_ref(uploaded, kind, project_id)
+                        except PippitError as exc:
+                            # An old upload's asynchronous registration can
+                            # arrive while the next file is being watched.
+                            # Never bind an image asset as a video reference.
+                            if "asset type mismatch" in str(exc) and attempt == 0:
+                                continue
+                            raise
+                        self.store.media_cache_put(account_id, kind, digest, uploaded)
+                        result[kind].append(reference)
+                        break
         return result
 
     def _query_asset_ref(self, uploaded: dict[str, Any], kind: str,
@@ -229,6 +239,9 @@ class PippitClient:
         if not matches:
             raise PippitError("Pippit uploaded asset is not available for submission")
         record = matches[0]
+        expected_type = {"images": 1, "videos": 2, "audios": 3}[kind]
+        if str(record.get("AssetType")) != str(expected_type):
+            raise PippitError(f"Pippit asset type mismatch: expected {kind} asset")
         base = {"asset_id": str(record.get("SourceID") or uploaded.get("asset_id") or ""),
                 "pippit_asset_id": asset_id}
         if kind == "images":
