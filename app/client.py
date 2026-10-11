@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import threading
 import time
 import uuid
 from typing import Any
 
 from .browser import CDPBrowser, account_proxy_url
 from .catalog import bind_prompt
-from .media import upload_media
+from .media import _download, upload_media, upload_media_bytes
+from .store import Store
+
+
+_MEDIA_LOCKS_GUARD = threading.RLock()
+_MEDIA_LOCKS: dict[int, threading.RLock] = {}
 
 
 class PippitError(Exception):
@@ -135,9 +142,10 @@ def extract_result_urls(run: dict[str, Any]) -> list[str]:
 
 
 class PippitClient:
-    def __init__(self, account: dict[str, Any]):
+    def __init__(self, account: dict[str, Any], *, store: Store | None = None):
         account_proxy_url(account)
         self.account = account
+        self.store = store
         self.browser = CDPBrowser(int(account["cdp_port"]))
 
     def account_state(self) -> dict[str, Any]:
@@ -158,8 +166,28 @@ class PippitClient:
         for kind in ("images", "videos", "audios"):
             result[kind] = []
             for source in normalized[kind]:
-                uploaded = upload_media(source, kind, browser=self.browser, proxy_url=proxy)
-                result[kind].append(self._query_asset_ref(uploaded, kind, project_id))
+                if not self.store or source.startswith("pippit:"):
+                    uploaded = upload_media(source, kind, browser=self.browser, proxy_url=proxy)
+                    result[kind].append(self._query_asset_ref(uploaded, kind, project_id))
+                    continue
+                data, mime, filename = _download(source, kind, proxy)
+                digest = hashlib.sha256(data).hexdigest()
+                account_id = int(self.account["id"])
+                with _MEDIA_LOCKS_GUARD:
+                    lock = _MEDIA_LOCKS.setdefault(account_id, threading.RLock())
+                with lock:
+                    cached = self.store.media_cache_get(account_id, kind, digest)
+                    if cached:
+                        try:
+                            result[kind].append(self._query_asset_ref(cached, kind, project_id))
+                            continue
+                        except PippitError:
+                            self.store.media_cache_delete(account_id, kind, digest)
+                    uploaded = upload_media_bytes(data, mime, filename, kind,
+                                                  browser=self.browser)
+                    reference = self._query_asset_ref(uploaded, kind, project_id)
+                    self.store.media_cache_put(account_id, kind, digest, uploaded)
+                    result[kind].append(reference)
         return result
 
     def _query_asset_ref(self, uploaded: dict[str, Any], kind: str,

@@ -60,6 +60,17 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status, created_at);
                 CREATE INDEX IF NOT EXISTS tasks_account ON tasks(account_id, status);
+                CREATE TABLE IF NOT EXISTS media_cache (
+                    account_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    pippit_asset_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL DEFAULT '',
+                    mime TEXT NOT NULL DEFAULT '',
+                    bytes INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (account_id, kind, digest)
+                );
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
         try:
@@ -164,7 +175,36 @@ class Store:
 
     def delete_account(self, account_id: int) -> bool:
         with self._lock, self._connect() as db:
+            db.execute("DELETE FROM media_cache WHERE account_id=?", (account_id,))
             return bool(db.execute("DELETE FROM accounts WHERE id=?", (account_id,)).rowcount)
+
+    def media_cache_get(self, account_id: int, kind: str, digest: str) -> dict[str, Any] | None:
+        with self._connect() as db:
+            row = db.execute("""SELECT pippit_asset_id,source_id,mime,bytes FROM media_cache
+                WHERE account_id=? AND kind=? AND digest=?""", (account_id, kind, digest)).fetchone()
+        return ({"pippit_asset_id": row["pippit_asset_id"], "asset_id": row["source_id"],
+                 "mime": row["mime"], "bytes": row["bytes"]} if row else None)
+
+    def media_cache_put(self, account_id: int, kind: str, digest: str,
+                        uploaded: dict[str, Any]) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("""INSERT INTO media_cache(account_id,kind,digest,pippit_asset_id,
+                source_id,mime,bytes,created_at) VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(account_id,kind,digest) DO UPDATE SET
+                pippit_asset_id=excluded.pippit_asset_id,source_id=excluded.source_id,
+                mime=excluded.mime,bytes=excluded.bytes,created_at=excluded.created_at""",
+                (account_id, kind, digest, str(uploaded["pippit_asset_id"]),
+                 str(uploaded.get("asset_id") or ""), str(uploaded.get("mime") or ""),
+                 int(uploaded.get("bytes") or 0), time.time()))
+
+    def media_cache_delete(self, account_id: int, kind: str, digest: str) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("DELETE FROM media_cache WHERE account_id=? AND kind=? AND digest=?",
+                       (account_id, kind, digest))
+
+    def clear_media_cache(self, account_id: int) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("DELETE FROM media_cache WHERE account_id=?", (account_id,))
 
     def create_task(self, task_id: str, request: dict[str, Any], normalized: dict[str, Any]) -> dict[str, Any]:
         now = time.time()

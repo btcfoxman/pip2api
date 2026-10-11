@@ -1,0 +1,38 @@
+from app.client import PippitClient
+from app.store import Store
+
+
+def test_uploaded_asset_is_reused_for_same_account_and_content(tmp_path, monkeypatch):
+    store = Store(str(tmp_path / "pip.db"))
+    account = {"id": 1, "cdp_port": 19301, "proxy_url": "socks5://example.com:20001",
+               "project_id": "123"}
+    uploads = []
+
+    class Browser:
+        def __init__(self, _port):
+            pass
+
+        def post(self, path, body):
+            assert path == "/api/biz/v1/asset/query"
+            assert body["project_id"] == 123
+            return {"Assets": [{"PippitAssetID": body["pippit_asset_ids"][0],
+                                "SourceID": "source-1", "Image": {"metadata": {}}}]}
+
+    monkeypatch.setattr("app.client.CDPBrowser", Browser)
+    monkeypatch.setattr("app.client._download", lambda *_: (b"same-content", "image/png", "x.png"))
+
+    def upload(*_args, **_kwargs):
+        uploads.append(True)
+        return {"pippit_asset_id": "asset-1", "asset_id": "source-1",
+                "mime": "image/png", "bytes": 12}
+
+    monkeypatch.setattr("app.client.upload_media_bytes", upload)
+    client = PippitClient(account, store=store)
+    normalized = {"images": ["https://example.com/x.png"], "videos": [], "audios": []}
+    first = client.upload_inputs(normalized)
+    second = client.upload_inputs(normalized)
+    assert len(uploads) == 1
+    assert first["images"] == second["images"]
+    store.clear_media_cache(1)
+    client.upload_inputs(normalized)
+    assert len(uploads) == 2

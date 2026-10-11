@@ -5,15 +5,18 @@ from __future__ import annotations
 import base64
 import ipaddress
 import mimetypes
+import struct
 import tempfile
 import time
+import uuid
+import zlib
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 import requests
 
-from .browser import BrowserError, CDPBrowser
+from .browser import BrowserError, BrowserRejected, CDPBrowser
 
 
 MAX_MEDIA_BYTES = 200 * 1024 * 1024
@@ -23,6 +26,29 @@ MIME_EXTENSIONS = {"audio/mpeg": ".mp3", "audio/wav": ".wav", "image/jpeg": ".jp
 
 class MediaError(Exception):
     pass
+
+
+def _unique_image_copy(data: bytes, mime: str) -> bytes | None:
+    """Make a visually identical upload copy when a prior asset lacks a cache ID."""
+    marker = b"pip2api-upload\x00" + uuid.uuid4().hex.encode("ascii")
+    if mime == "image/png" and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        position = 8
+        while position + 12 <= len(data):
+            length = struct.unpack_from(">I", data, position)[0]
+            end = position + 12 + length
+            if end > len(data):
+                return None
+            if data[position + 4:position + 8] == b"IEND":
+                if position + 12 != len(data) or length:
+                    return None
+                chunk = (struct.pack(">I", len(marker)) + b"tEXt" + marker
+                         + struct.pack(">I", zlib.crc32(b"tEXt" + marker) & 0xffffffff))
+                return data[:position] + chunk + data[position:]
+            position = end
+    if mime == "image/jpeg" and data.startswith(b"\xff\xd8"):
+        comment = b"pip2api-upload:" + uuid.uuid4().hex.encode("ascii")
+        return data[:2] + b"\xff\xfe" + struct.pack(">H", len(comment) + 2) + comment + data[2:]
+    return None
 
 
 def _allow_direct_media_fallback(host: str | None) -> bool:
@@ -121,12 +147,27 @@ def upload_media(source: str, kind: str, *, browser: CDPBrowser,
             raise MediaError("Pippit asset ID is empty")
         return {"pippit_asset_id": asset_id}
     data, mime, filename = _download(source, kind, proxy_url)
+    return upload_media_bytes(data, mime, filename, kind, browser=browser)
+
+
+def upload_media_bytes(data: bytes, mime: str, filename: str, kind: str, *,
+                       browser: CDPBrowser) -> dict[str, Any]:
     suffix = Path(filename).suffix.lower() or MIME_EXTENSIONS.get(mime, ".bin")
     try:
         with tempfile.TemporaryDirectory(prefix="pip2api-media-") as root:
             path = Path(root) / (kind + suffix)
             path.write_bytes(data)
-            result = browser.upload_file(path)
+            try:
+                result = browser.upload_file(path)
+            except BrowserRejected as exc:
+                if kind != "images" or "ret=1" not in str(exc):
+                    raise
+                variant = _unique_image_copy(data, mime)
+                if variant is None:
+                    raise
+                path.write_bytes(variant)
+                result = browser.upload_file(path)
+                data = variant
     except BrowserError as exc:
         raise MediaError(f"Pippit web upload failed: {exc}") from exc
     asset_id = result.get("PippitAssetID") or result.get("pippit_asset_id")

@@ -286,12 +286,31 @@ class CDPBrowser:
                 command("Input.dispatchMouseEvent", {"type": kind, "x": point["x"],
                     "y": point["y"], "button": "left", "clickCount": 1})
 
+        def clear_composer_attachments() -> None:
+            count_js = "document.querySelectorAll('[data-slot=\"prompt-composer\"] [data-slot=\"attachment-preview-media-shell\"]').length"
+            click_js = "(()=>{const x=document.querySelector('[data-slot=\"prompt-composer\"] [data-slot=\"attachment-preview-remove-button\"]');x?.click();return !!x})()"
+            for _ in range(50):
+                count = int(evaluate(count_js) or 0)
+                if count == 0:
+                    return
+                if not evaluate(click_js):
+                    raise BrowserError("Pippit composer attachment cannot be removed")
+                until = time.monotonic() + 3
+                while time.monotonic() < until:
+                    if int(evaluate(count_js) or 0) < count:
+                        break
+                    time.sleep(.1)
+                else:
+                    raise BrowserError("Pippit composer attachment did not clear")
+            raise BrowserError("Pippit composer has too many stale attachments")
+
         create_body: dict[str, Any] | None = None
         create_result: dict[str, Any] | None = None
         intercept_chooser = False
         try:
             command("Page.enable")
             command("Network.enable")
+            clear_composer_attachments()
             # Current Pippit keeps its composer input mounted even when the upload
             # dropdown does not open. Setting this input dispatches the same change
             # event as the browser file picker and preserves the account's proxy.
@@ -369,6 +388,12 @@ class CDPBrowser:
         except (OSError, websocket.WebSocketException) as exc:
             raise BrowserError(f"Pippit browser upload failed: {type(exc).__name__}") from exc
         finally:
+            try:
+                clear_composer_attachments()
+            except Exception:
+                # A failed upload must retain its original error. The next upload
+                # will try to clear any remaining composer attachments first.
+                pass
             if intercept_chooser:
                 try:
                     command("Page.setInterceptFileChooserDialog", {"enabled": False})

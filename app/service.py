@@ -206,7 +206,7 @@ class Service:
         account_id = int(account["id"])
         try:
             self.store.update_task(task_id, {"account_id": account_id, "status": "preparing", "progress": 5})
-            client = PippitClient(account)
+            client = PippitClient(account, store=self.store)
             before = client.account_state()["available_balance"]
             self.store.update_account(account_id, {"balance": before, "status": "active"})
             self.store.update_task(task_id, {"balance_before": before, "progress": 12})

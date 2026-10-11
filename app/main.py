@@ -217,6 +217,7 @@ def reset_profile(account_id: int, body: dict[str, Any] = Body(default={})) -> d
            for task in store.tasks(10000)):
         raise HTTPException(status_code=409, detail="account has active tasks")
     clear_managed_profile(account, Path(str(service.settings()["chrome_user_data_root"])))
+    store.clear_media_cache(account_id)
     values: dict[str, Any] = {"cdp_port": 0, "project_id": "", "status": "pending",
                               "last_error": ""}
     if body.get("proxy_url") is not None:
