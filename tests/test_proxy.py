@@ -145,6 +145,43 @@ def test_known_caller_media_host_uses_direct_first(monkeypatch):
     assert routes == [{}]
 
 
+def test_known_media_host_retries_direct_after_proxy_timeouts(monkeypatch):
+    routes = []
+    monkeypatch.setattr("app.media.time.sleep", lambda _: None)
+
+    class Response:
+        headers = {"Content-Type": "image/png"}
+        status_code = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, *_):
+            yield b"png"
+
+    class Session:
+        def get(self, _url, **kwargs):
+            routes.append(kwargs["proxies"])
+            if len(routes) < 4:
+                raise requests.exceptions.ReadTimeout("temporary network stall")
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("app.media.requests.Session", Session)
+    data, _, _ = _download("https://media.juxingdonghua.com/input.png", "images",
+                           "socks5://host.docker.internal:20001")
+    assert data == b"png"
+    assert [bool(route) for route in routes] == [False, True, True, False]
+
+
 def test_pippit_media_does_not_bypass_account_proxy(monkeypatch):
     routes = []
     monkeypatch.setattr("app.media.time.sleep", lambda _: None)

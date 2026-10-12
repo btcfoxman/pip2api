@@ -128,7 +128,9 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
                 direct_first = (parsed.hostname in _DIRECT_FIRST_MEDIA_HOSTS or
                                 _DIRECT_MEDIA_UNTIL.get(parsed.hostname, 0) > time.monotonic())
             direct_route = ("direct media fallback", {})
-            routes = ([direct_route] + routes) if direct_first else (routes + [direct_route])
+            # A short direct-route interruption must not leave a caller-owned
+            # media host at the mercy of a consistently timing-out proxy.
+            routes = ([direct_route] + routes + [direct_route]) if direct_first else (routes + [direct_route])
         for index, (route_name, route_proxy) in enumerate(routes):
             session = requests.Session()
             session.trust_env = False
@@ -181,7 +183,7 @@ def _download(source: str, kind: str, proxy_url: str = "") -> tuple[bytes, str, 
                     continue
                 raise MediaError(f"media download failed via {route_name}: {type(exc).__name__}") from exc
             except MediaError as exc:
-                if direct_first and "direct media fallback redirected" in str(exc):
+                if direct_first and index < len(routes) - 1 and "direct media fallback redirected" in str(exc):
                     with _MEDIA_ROUTE_LOCK:
                         _DIRECT_MEDIA_UNTIL.pop(parsed.hostname, None)
                     continue

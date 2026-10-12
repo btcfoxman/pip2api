@@ -309,6 +309,8 @@ class CDPBrowser:
         create_result: dict[str, Any] | None = None
         upload_phases = {"prepare": 0, "chunks": 0, "cloud_asset": 0, "registration": 0,
                          "network_failed": 0}
+        upload_failures: list[str] = []
+        request_phases: dict[str, str] = {}
         intercept_chooser = False
         try:
             command("Page.enable")
@@ -358,7 +360,10 @@ class CDPBrowser:
                 command("DOM.setFileInputFiles", {"files": [str(path.resolve())],
                         "backendNodeId": chooser["params"]["backendNodeId"]})
             tracked: dict[str, str] = {}
-            until = time.monotonic() + 90
+            # Large image references can take longer than 90 seconds through
+            # the account proxy. Keep the wait bounded by the task timeout.
+            megabytes = (path.stat().st_size + (1 << 20) - 1) // (1 << 20)
+            until = time.monotonic() + min(240, max(90, 60 + megabytes * 8))
             while time.monotonic() < until and create_result is None:
                 if pending:
                     item = pending.popleft()
@@ -374,7 +379,14 @@ class CDPBrowser:
                 if method == "Network.requestWillBeSent":
                     request = params.get("request") or {}
                     route = urllib.parse.urlsplit(str(request.get("url") or "")).path
+                    if route.endswith("/asset/prepare_upload_cloud"):
+                        request_phases[request_id] = "prepare"
+                    elif route.startswith("/upload/v1/"):
+                        request_phases[request_id] = "chunk"
+                    elif route.endswith("/asset/create_cloud_asset"):
+                        request_phases[request_id] = "cloud_asset"
                     if route.endswith("/asset/create_v2"):
+                        request_phases[request_id] = "registration"
                         raw = request.get("postData")
                         if raw:
                             try:
@@ -382,7 +394,12 @@ class CDPBrowser:
                             except ValueError:
                                 pass
                 elif method == "Network.responseReceived":
-                    route = urllib.parse.urlsplit(str((params.get("response") or {}).get("url") or "")).path
+                    response = params.get("response") or {}
+                    route = urllib.parse.urlsplit(str(response.get("url") or "")).path
+                    phase = request_phases.get(request_id)
+                    status = int(response.get("status") or 0)
+                    if phase and status >= 400 and len(upload_failures) < 4:
+                        upload_failures.append(f"{phase}:HTTP {status}")
                     if route.endswith("/asset/prepare_upload_cloud"):
                         upload_phases["prepare"] += 1
                     elif route.startswith("/upload/v1/"):
@@ -394,6 +411,10 @@ class CDPBrowser:
                         tracked[request_id] = route
                 elif method == "Network.loadingFailed":
                     upload_phases["network_failed"] += 1
+                    phase = request_phases.get(request_id)
+                    if phase and len(upload_failures) < 4:
+                        error = str(params.get("errorText") or "network failed")
+                        upload_failures.append(f"{phase}:{error[:80]}")
                 elif method == "Network.loadingFinished" and request_id in tracked:
                     result = command("Network.getResponseBody", {"requestId": request_id})
                     raw = result.get("body") or "{}"
@@ -420,6 +441,8 @@ class CDPBrowser:
             ws.close()
         if create_result is None:
             phases = ", ".join(f"{key}={value}" for key, value in upload_phases.items())
+            if upload_failures:
+                phases += ", failures=" + "; ".join(upload_failures)
             raise BrowserError(f"Pippit asset creation did not complete ({phases})")
         if str(create_result.get("ret")) != "0" and create_body:
             # This registration RPC is idempotent by source asset ID.
