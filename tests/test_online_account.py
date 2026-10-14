@@ -86,6 +86,7 @@ class OnlineLoginTests(unittest.IsolatedAsyncioTestCase):
         client = Mock()
         client.account_state.return_value = {'available_balance': 123, 'buckets': {'gift': 123}}
         client.browser.project_id.return_value = '456'
+        client.ensure_no_watermark.return_value = 'enabled'
         with patch('app.browser_login.LoginDesktop', FakeDesktop), \
              patch('app.browser_login.UpstreamClient', return_value=client), \
              patch.object(self.service.browser_runtime, 'close_idle'):
@@ -102,6 +103,8 @@ class OnlineLoginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['cdp_port'], 29999)
         self.assertEqual(result['project_id'], '456')
         self.assertEqual(result['balance'], 123)
+        self.assertEqual(result['watermark_status'], 'enabled')
+        client.ensure_no_watermark.assert_called_once_with()
         self.assertIsNone(self.manager.active)
         with patch('app.browser_runtime.browser_alive', return_value=True), \
              patch('app.browser_runtime.start_managed_browser') as start:

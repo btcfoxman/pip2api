@@ -192,6 +192,32 @@ class PippitClient:
                       ("vip_credit", "gift_credit", "purchase_credit"))
         return {"available_balance": balance, "buckets": credit}
 
+    def ensure_no_watermark(self) -> str:
+        """Enable the account-level no-watermark option when the plan permits it."""
+        uid = self.browser.user_info()["consumer_uid"]
+
+        def settings() -> dict[str, Any]:
+            data = self.browser.post("/api/biz/v1/user/mget_user_setting", {})
+            value = data.get(uid)
+            if not isinstance(value, dict) or not isinstance(
+                    value.get("aigc_watermark_ban_enabled"), bool):
+                raise PippitError("Pippit no-watermark setting could not be read")
+            return value
+
+        current = settings()
+        if current.get("must_pippit_ai_watermark_enabled") is True:
+            return "plan_requires_watermark"
+        if current["aigc_watermark_ban_enabled"]:
+            return "enabled"
+        self.browser.post("/api/biz/v1/user/update_user_setting", {
+            "user_settings": {"aigc_watermark_ban_enabled": True},
+        })
+        updated = settings()
+        if (updated.get("must_pippit_ai_watermark_enabled") is True
+                or updated["aigc_watermark_ban_enabled"] is not True):
+            raise PippitError("Pippit no-watermark setting did not stay enabled")
+        return "enabled"
+
     def daily_checkin(self) -> dict[str, Any]:
         return self.browser.post("/commerce/v1/benefits/credit_receive",
                                  {"source": "web", "time_zone": os.getenv("PIP_TIME_ZONE", "Asia/Taipei")})

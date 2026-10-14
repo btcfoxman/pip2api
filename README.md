@@ -6,6 +6,8 @@ PIP2API exposes Pippit's logged-in web video workflow as a task API. The managem
 
 Copy `.env.example` to `.env` and set unique `PIP_API_KEY` and `PIP_ADMIN_TOKEN` values. Start with `docker compose up -d`. The console is on port `8807` by default; `/health` is unauthenticated. Use **在线添加账号** with a name and account proxy, then log in through the embedded noVNC browser, open a video project, and click **完成登录并验证**. The account row's **网页登录** action reconnects to the same Chrome. The verified browser stays running and its CDP session is used by task submission, polling, credit checks, and daily check-in. After a service restart, the browser is restored from its persisted profile.
 
+During online login verification, PIP2API reads the account's Pippit watermark setting and enables the no-watermark option if the plan allows it. It reads the setting again before enabling the account. If the plan requires a watermark, login still completes and the console reports that limitation.
+
 The preproduction workflow is `.github/workflows/deploy-test.yml`. It builds an image in GHCR and deploys on the `pip2api-pre` self-hosted runner on 3.5 pre. Prepare `/home/btcfoxman/docker/pip2api/.env` on the server and register the runner before dispatch. The workflow also manages the `pip2api.aiid.edu.kg` cloudflared ingress.
 
 Set a SOCKS or HTTP proxy on each account before opening its managed browser. Pippit login, credit, upload, submit, and polling requests all use that account's proxied Chromium session. The managed browser refuses to start without an account proxy. For `pip-1.bat`, the account's server-side proxy is `socks5://host.docker.internal:20001`, corresponding to the launcher's `socks5://127.0.0.1:20001` on the host.

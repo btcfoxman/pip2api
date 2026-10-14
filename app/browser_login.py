@@ -14,7 +14,8 @@ from urllib.parse import urlsplit
 
 import requests
 
-from .client import PippitClient as UpstreamClient
+from .browser import BrowserError
+from .client import PippitClient as UpstreamClient, PippitError
 
 REQUIRES_PROJECT = True
 
@@ -302,6 +303,10 @@ class BrowserLoginManager:
                 project_id = client.browser.project_id()
                 if REQUIRES_PROJECT and not (project_id or account["project_id"]):
                     raise LoginError("open a Pippit video project before finishing login")
+                try:
+                    watermark_status = await asyncio.to_thread(client.ensure_no_watermark)
+                except (BrowserError, PippitError) as exc:
+                    raise LoginError(f"Pippit no-watermark verification failed: {exc}") from exc
                 values = {"cdp_port": active["desktop"].cdp_port,
                           "managed_profile": True, "enabled": active["enable_after"],
                           "status": "active" if active["enable_after"] else "disabled",
@@ -317,6 +322,7 @@ class BrowserLoginManager:
                     self.store.clear_media_cache(account_id)
                     result = self.store.update_account(account_id, values)
                     self.active = None  # Viewer ticket expires; Chrome stays online.
+                result["watermark_status"] = watermark_status
                 return result
             except asyncio.CancelledError:
                 active["phase"] = "login"

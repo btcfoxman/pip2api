@@ -66,14 +66,15 @@
     if (!sessionId || busy) return;
     busy = true;
     finish.disabled = true;
-    message.textContent = '正在验证会话及积分…';
+    message.textContent = '正在验证会话、积分及去水印设置…';
     try {
       const account = await request(`/api/admin/account-login/${encodeURIComponent(sessionId)}/finish`, 'POST');
       sessionId = '';
       frame.src = 'about:blank';
       dialog.close();
       if (window.refresh) await window.refresh();
-      if (window.toast) window.toast(`账号 #${account.id} 已验证，余额 ${account.balance ?? '—'}`);
+      const watermark = account.watermark_status === 'enabled' ? '去水印已开启' : '当前套餐强制带水印';
+      if (window.toast) window.toast(`账号 #${account.id} 已验证，余额 ${account.balance ?? '—'}；${watermark}`);
     } catch (error) {
       message.textContent = `验证未完成：${error.message}。请检查远端页面后重试。`;
     } finally { finish.disabled = false; busy = false; }
