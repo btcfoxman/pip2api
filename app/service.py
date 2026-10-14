@@ -15,7 +15,7 @@ from typing import Any
 from .browser import BrowserError, BrowserRejected, browser_alive, start_managed_browser, stop_managed_browser
 from .browser_runtime import BrowserRuntime
 from .catalog import normalize_request
-from .client import PippitClient, PippitError
+from .client import PippitClient, PippitError, account_media_lock
 from .errors import public_error
 from .media import MediaError
 from .store import Store
@@ -75,10 +75,18 @@ class Service:
             elif task["status"] in {"submitted", "running"} and task["run_id"] and task["thread_id"]:
                 self._pool.submit(self._resume_poll, task["id"])
             elif task["status"] == "preparing":
-                self.store.update_task(task["id"], {"status": "failed", "progress": 100,
-                    "error_code": "UPSTREAM_SUBMIT_OUTCOME_UNKNOWN",
-                    "error_message": "service restarted during preparation; automatic resubmission is disabled",
-                    "completed_at": time.time()})
+                if int(task["progress"]) < 30 and not task["run_id"]:
+                    # Reference upload has not reached the generation RPC. It is
+                    # safe to repeat after a restart, including an interrupted
+                    # browser upload; the external task ID stays the same.
+                    self.store.update_task(task["id"], {"status": "queued", "progress": 0,
+                        "account_id": None, "error_code": "", "error_message": ""})
+                    self._pool.submit(self._run, task["id"])
+                else:
+                    self.store.update_task(task["id"], {"status": "failed", "progress": 100,
+                        "error_code": "UPSTREAM_SUBMIT_OUTCOME_UNKNOWN",
+                        "error_message": "service restarted during upstream submission; automatic resubmission is disabled",
+                        "completed_at": time.time()})
 
     def stop(self) -> None:
         self._stop.set()
@@ -260,8 +268,8 @@ class Service:
         else:
             return
         account = None
-        deadline = time.monotonic() + int(self.settings()["task_timeout_seconds"])
-        while not account and time.monotonic() < deadline and not self._stop.is_set():
+        account_deadline = time.monotonic() + int(self.settings()["task_timeout_seconds"])
+        while not account and time.monotonic() < account_deadline and not self._stop.is_set():
             account = self._reserve_account(float(task.get("estimated_cost") or 0))
             if not account:
                 time.sleep(1)
@@ -272,27 +280,30 @@ class Service:
         account_id = int(account["id"])
         owned = False
         try:
-            self.store.update_task(task_id, {"account_id": account_id, "status": "preparing", "progress": 5})
-            account, owned = self.browser_runtime.acquire(account)
-            client = PippitClient(account, store=self.store)
-            before = client.account_state()["available_balance"]
-            self.store.update_account(account_id, {"balance": before, "status": "active"})
-            self.store.update_task(task_id, {"balance_before": before, "progress": 12})
-            assets = client.upload_inputs(task["normalized"])
-            self.store.update_task(task_id, {"progress": 30})
-            try:
-                submitted = client.submit(task["normalized"], assets)
-            except BrowserRejected as exc:
-                self._fail(task_id, "UPSTREAM_REJECTED", str(exc))
-                return
-            except BrowserError as exc:
-                self._fail(task_id, "UPSTREAM_SUBMIT_OUTCOME_UNKNOWN",
-                           str(exc) + "; automatic resubmission is disabled")
-                return
-            self.store.update_task(task_id, {"status": "submitted", "progress": 40,
-                                              "run_id": submitted["run_id"],
-                                              "thread_id": submitted["thread_id"]})
-            self._poll(task_id, client, deadline)
+            with account_media_lock(account_id):
+                if self._stop.is_set():
+                    return
+                self.store.update_task(task_id, {"account_id": account_id, "status": "preparing", "progress": 5})
+                account, owned = self.browser_runtime.acquire(account)
+                client = PippitClient(account, store=self.store)
+                before = client.account_state()["available_balance"]
+                self.store.update_account(account_id, {"balance": before, "status": "active"})
+                self.store.update_task(task_id, {"balance_before": before, "progress": 12})
+                assets = client.upload_inputs(task["normalized"])
+                self.store.update_task(task_id, {"progress": 30})
+                try:
+                    submitted = client.submit(task["normalized"], assets)
+                except BrowserRejected as exc:
+                    self._fail(task_id, "UPSTREAM_REJECTED", str(exc))
+                    return
+                except BrowserError as exc:
+                    self._fail(task_id, "UPSTREAM_SUBMIT_OUTCOME_UNKNOWN",
+                               str(exc) + "; automatic resubmission is disabled")
+                    return
+                self.store.update_task(task_id, {"status": "submitted", "progress": 40,
+                                                  "run_id": submitted["run_id"],
+                                                  "thread_id": submitted["thread_id"]})
+            self._poll(task_id, client, time.monotonic() + int(self.settings()["task_timeout_seconds"]))
         except (BrowserError, PippitError, MediaError, ValueError) as exc:
             self._fail(task_id, type(exc).__name__.upper(), str(exc))
         except Exception as exc:

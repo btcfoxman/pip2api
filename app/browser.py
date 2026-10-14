@@ -436,7 +436,9 @@ class CDPBrowser:
             # the account proxy. Keep the wait bounded by the task timeout.
             megabytes = (path.stat().st_size + (1 << 20) - 1) // (1 << 20)
             until = time.monotonic() + min(240, max(90, 60 + megabytes * 8))
-            while time.monotonic() < until and create_result is None:
+            idle_until = time.monotonic() + max(45, min(75, 30 + megabytes * 2))
+            upload_started = False
+            while time.monotonic() < until and (upload_started or time.monotonic() < idle_until) and create_result is None:
                 if pending:
                     item = pending.popleft()
                 else:
@@ -453,12 +455,16 @@ class CDPBrowser:
                     route = urllib.parse.urlsplit(str(request.get("url") or "")).path
                     if route.endswith("/asset/prepare_upload_cloud"):
                         request_phases[request_id] = "prepare"
+                        upload_started = True
                     elif route.startswith("/upload/v1/"):
                         request_phases[request_id] = "chunk"
+                        upload_started = True
                     elif route.endswith("/asset/create_cloud_asset"):
                         request_phases[request_id] = "cloud_asset"
+                        upload_started = True
                     if route.endswith("/asset/create_v2"):
                         request_phases[request_id] = "registration"
+                        upload_started = True
                         raw = request.get("postData")
                         if raw:
                             try:
@@ -513,6 +519,8 @@ class CDPBrowser:
             ws.close()
         if create_result is None:
             phases = ", ".join(f"{key}={value}" for key, value in upload_phases.items())
+            if not upload_started:
+                phases += ", no upload request after file selection"
             if upload_failures:
                 phases += ", failures=" + "; ".join(upload_failures)
             raise BrowserError(f"Pippit asset creation did not complete ({phases})")

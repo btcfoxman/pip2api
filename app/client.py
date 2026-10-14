@@ -21,6 +21,12 @@ _MEDIA_LOCKS_GUARD = threading.RLock()
 _MEDIA_LOCKS: dict[int, threading.RLock] = {}
 
 
+def account_media_lock(account_id: int) -> threading.RLock:
+    """Serialize one account's complete reference upload batch and submission."""
+    with _MEDIA_LOCKS_GUARD:
+        return _MEDIA_LOCKS.setdefault(account_id, threading.RLock())
+
+
 class PippitError(Exception):
     pass
 
@@ -204,9 +210,7 @@ class PippitClient:
                 data, mime, filename = _download(source, kind, proxy)
                 digest = hashlib.sha256(data).hexdigest()
                 account_id = int(self.account["id"])
-                with _MEDIA_LOCKS_GUARD:
-                    lock = _MEDIA_LOCKS.setdefault(account_id, threading.RLock())
-                with lock:
+                with account_media_lock(account_id):
                     cached = self.store.media_cache_get(account_id, kind, digest)
                     if cached:
                         try:

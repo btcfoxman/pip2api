@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import ipaddress
 import mimetypes
 import struct
@@ -17,11 +18,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import requests
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .browser import BrowserError, BrowserRejected, CDPBrowser
 
 
 MAX_MEDIA_BYTES = 200 * 1024 * 1024
+# Files above this size have stalled in the browser composer before the first
+# upload RPC. Leave smaller caller images untouched; normalize only large ones.
+MAX_BROWSER_IMAGE_BYTES = 14 * 1024 * 1024
 MIME_EXTENSIONS = {"audio/mpeg": ".mp3", "audio/wav": ".wav", "image/jpeg": ".jpg",
                    "image/png": ".png", "video/mp4": ".mp4", "video/quicktime": ".mov"}
 _MEDIA_ROUTE_LOCK = threading.RLock()
@@ -34,6 +39,37 @@ _DIRECT_FIRST_MEDIA_HOSTS = frozenset({"media.juxingdonghua.com"})
 
 class MediaError(Exception):
     pass
+
+
+def _prepare_browser_image(data: bytes, mime: str) -> tuple[bytes, str, str]:
+    """Bound large reference images before giving them to Pippit's file input."""
+    if len(data) <= MAX_BROWSER_IMAGE_BYTES:
+        return data, mime, MIME_EXTENSIONS.get(mime, ".img")
+    try:
+        with Image.open(io.BytesIO(data)) as opened:
+            image = ImageOps.exif_transpose(opened)
+            image.load()
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        raise MediaError("large reference image cannot be decoded for upload") from exc
+
+    has_alpha = "A" in image.getbands() or "transparency" in image.info
+    image = image.convert("RGBA" if has_alpha else "RGB")
+    for _ in range(10):
+        output = io.BytesIO()
+        if has_alpha:
+            image.save(output, format="PNG", optimize=True, compress_level=9)
+            result_mime, suffix = "image/png", ".png"
+        else:
+            image.save(output, format="JPEG", quality=88, subsampling=0)
+            result_mime, suffix = "image/jpeg", ".jpg"
+        if output.tell() <= MAX_BROWSER_IMAGE_BYTES:
+            return output.getvalue(), result_mime, suffix
+        width, height = image.size
+        if min(width, height) <= 320:
+            break
+        image = image.resize((max(1, int(width * .8)), max(1, int(height * .8))),
+                             Image.Resampling.LANCZOS)
+    raise MediaError("reference image cannot be reduced below the browser upload size limit")
 
 
 def _unique_image_copy(data: bytes, mime: str) -> bytes | None:
@@ -218,6 +254,8 @@ def upload_media(source: str, kind: str, *, browser: CDPBrowser,
 def upload_media_bytes(data: bytes, mime: str, filename: str, kind: str, *,
                        browser: CDPBrowser) -> dict[str, Any]:
     suffix = Path(filename).suffix.lower() or MIME_EXTENSIONS.get(mime, ".bin")
+    if kind == "images" and len(data) > MAX_BROWSER_IMAGE_BYTES:
+        data, mime, suffix = _prepare_browser_image(data, mime)
     try:
         with tempfile.TemporaryDirectory(prefix="pip2api-media-") as root:
             path = Path(root) / (kind + suffix)

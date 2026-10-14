@@ -1,5 +1,9 @@
 import struct
+import io
+import os
 import zlib
+
+from PIL import Image
 
 from app.browser import BrowserError, BrowserRejected
 from app.media import _unique_image_copy, _unique_mp4_copy, upload_media_bytes
@@ -97,3 +101,24 @@ def test_incomplete_asset_registration_never_loops_forever():
     else:
         raise AssertionError("expected the bounded upload failure")
     assert calls == 2
+
+
+def test_large_png_is_uploadable_without_waiting_on_browser_file_processing():
+    pixels = os.urandom(2600 * 2600 * 3)
+    source = io.BytesIO()
+    Image.frombytes("RGB", (2600, 2600), pixels).save(source, format="PNG", compress_level=0)
+    assert len(source.getvalue()) > 19 * 1024 * 1024
+    seen = []
+
+    class Browser:
+        def upload_file(self, path):
+            with Image.open(path) as image:
+                image.verify()
+            seen.append((path.suffix, path.stat().st_size))
+            return {"PippitAssetID": "large-image-asset"}
+
+    result = upload_media_bytes(source.getvalue(), "image/png", "large.png", "images", browser=Browser())
+    assert result["pippit_asset_id"] == "large-image-asset"
+    assert seen[0][1] <= 14 * 1024 * 1024
+    assert seen[0][0] == ".jpg"
+    assert result["mime"] == "image/jpeg"
