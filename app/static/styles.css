@@ -518,3 +518,17 @@ textarea { resize: vertical; }
   .settings-dialog-footer > span { display: none; }
   .settings-dialog-footer > div { width: 100%; justify-content: flex-end; }
 }
+
+/* Managed online browser login uses the same console palette and controls. */
+.online-account-dialog { width:min(1120px, calc(100vw - 24px)); max-width:none; padding:0; overflow:hidden; }
+.online-account-layout { display:flex; flex-direction:column; height:min(860px, calc(100vh - 24px)); padding:12px; gap:10px; }
+.online-account-layout header { flex:none; }
+.online-account-fields { flex:none; }
+.online-account-fields .form-grid { grid-template-columns:1fr 140px; align-items:end; }
+.online-account-fields .form-grid .wide { grid-column:1 / -1; }
+.online-account-fields .form-grid button { grid-column:1 / -1; justify-self:start; }
+#onlineAccountFields[hidden], #onlineAccountFinish[hidden] { display:none; }
+#onlineAccountMessage { flex:none; margin:0; padding:8px 10px; color:var(--muted); background:#18252a; border:1px solid var(--line); border-radius:5px; }
+#onlineAccountFrame { flex:1; min-height:280px; width:100%; border:1px solid var(--line); border-radius:5px; background:#101826; }
+.online-account-layout footer { flex:none; }
+@media(max-width:650px) { .online-account-fields .form-grid { grid-template-columns:1fr; } .online-account-fields .form-grid .wide { grid-column:auto; } .online-account-layout header .caption { display:none; } }

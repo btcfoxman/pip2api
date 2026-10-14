@@ -4,7 +4,7 @@ PIP2API exposes Pippit's logged-in web video workflow as a task API. The managem
 
 ## Deployment
 
-Copy `.env.example` to `.env` and set unique `PIP_API_KEY` and `PIP_ADMIN_TOKEN` values. Start with `docker compose up -d`. The console is on port `8807` by default; `/health` is unauthenticated. Each account needs its own managed Chromium profile. Add the account in the console, open **Web login**, log in and open a video project, then click **Save login session**. The service records the project ID and credit buckets during account check.
+Copy `.env.example` to `.env` and set unique `PIP_API_KEY` and `PIP_ADMIN_TOKEN` values. Start with `docker compose up -d`. The console is on port `8807` by default; `/health` is unauthenticated. Use **在线添加账号** with a name and account proxy, then log in through the embedded noVNC browser, open a video project, and click **完成登录并验证**. The account row's **网页登录** action reconnects to the same Chrome. The verified browser stays running and its CDP session is used by task submission, polling, credit checks, and daily check-in. After a service restart, the browser is restored from its persisted profile.
 
 The preproduction workflow is `.github/workflows/deploy-test.yml`. It builds an image in GHCR and deploys on the `pip2api-pre` self-hosted runner on 3.5 pre. Prepare `/home/btcfoxman/docker/pip2api/.env` on the server and register the runner before dispatch. The workflow also manages the `pip2api.aiid.edu.kg` cloudflared ingress.
 
@@ -44,6 +44,6 @@ Prompt references such as `视频1`, `video2`, `v3`, `视4`, `图片1`, `图1`, 
 - A complete upstream rejection is recorded as `UPSTREAM_REJECTED`. An interrupted submit with unknown outcome is recorded as `UPSTREAM_SUBMIT_OUTCOME_UNKNOWN`; it is never automatically resubmitted.
 - The daily credit claim is optional. Enable it in runtime settings or click the account check-in endpoint. Each account is claimed at most once per Taiwan calendar day.
 - Media download first uses a direct connection, then the account or fallback proxy. Browser upload uses the logged-in Chromium tab. The service does not need a Pippit Skills key.
-- The account login screen sends click, scroll, text and key actions to the managed browser via CDP. Passwords typed there are not stored by PIP2API. Chrome profile data remain under `PIP_CHROME_USER_DATA_ROOT` and are removed when a service-managed account profile is reset or deleted.
+- The online login window is available only to an authenticated console session. Its noVNC stream stays on the same origin and supports clipboard paste. Passwords typed there are not stored by PIP2API. Chrome profile data remain under `PIP_CHROME_USER_DATA_ROOT` and are removed when a service-managed account profile is reset or deleted.
 
 The upstream web protocol can change. If Pippit changes its direct tool or browser upload flow, an upstream rejection is surfaced in the task record rather than silently changing the requested generation parameters.
