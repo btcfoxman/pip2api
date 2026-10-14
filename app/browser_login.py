@@ -101,7 +101,7 @@ class LoginDesktop:
         password_file = Path(self.folder.name) / "vnc-password"
         password_file.write_text(self.password + "\n", encoding="ascii")
         password_file.chmod(0o600)
-        xvfb = await self._spawn("Xvfb", "-displayfd", "1", "-screen", "0", "1440x900x24",
+        xvfb = await self._spawn("Xvfb", "-displayfd", "1", "-screen", "0", "1920x900x24",
                                  "-nolisten", "tcp", "-ac", stdout=asyncio.subprocess.PIPE)
         number = (await asyncio.wait_for(xvfb.stdout.readline(), 10)).decode().strip()
         if not number.isdigit() or xvfb.returncode is not None:
@@ -146,7 +146,8 @@ class LoginDesktop:
         self.cdp_port = self._port()
         args = ["chromium", f"--user-data-dir={self.profile}", "--no-sandbox",
                 "--disable-dev-shm-usage", "--password-store=basic", "--no-first-run",
-                "--no-default-browser-check", "--remote-debugging-address=127.0.0.1",
+                "--no-default-browser-check", "--start-maximized", "--window-size=1920,900",
+                "--window-position=0,0", "--remote-debugging-address=127.0.0.1",
                 f"--remote-debugging-port={self.cdp_port}"]
         if self.proxy:
             args.append("--proxy-server=" + self.proxy)
