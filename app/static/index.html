@@ -7,9 +7,9 @@
   <title>PIP2API Console</title>
   <link rel="stylesheet" href="/static/styles.css?v=20261011-1">
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
-  <script src="/static/app.js?v=20261011-1" defer></script>
+  <script src="/static/app.js?v=20261014-2" defer></script>
   <script src="/static/browser-assist.js?v=20261011-1" defer></script>
-  <script src="/static/account-login.js?v=20261014-1" defer></script>
+  <script src="/static/account-login.js?v=20261014-2" defer></script>
 </head>
 <body>
   <main class="shell">
@@ -20,7 +20,7 @@
       </div>
       <nav class="mast-actions" aria-label="主要操作">
         <button class="button primary" id="newTaskButton" type="button"><i data-lucide="sparkles"></i><span>测试调用</span></button>
-        <button class="button" id="onlineAddAccountButton" type="button"><i data-lucide="monitor-up"></i><span>??????</span></button>
+        <button class="button" id="onlineAddAccountButton" type="button"><i data-lucide="monitor-up"></i><span>在线添加账号</span></button>
         <button class="button" id="addAccountButton" type="button"><i data-lucide="user-plus"></i><span>账号</span></button>
         <button class="button" id="batchButton" type="button"><i data-lucide="users"></i><span>批量导入</span></button>
         <button class="icon-button" id="settingsButton" type="button" title="运行设置"><i data-lucide="settings"></i></button>
@@ -69,18 +69,18 @@
 
   <dialog id="onlineAccountDialog" class="online-account-dialog" aria-labelledby="onlineAccountTitle">
     <div class="online-account-layout">
-      <header><div><p class="eyebrow">BROWSER ACCOUNT</p><h2 id="onlineAccountTitle">?????????</h2></div><span class="caption">?? Profile ? ???????</span></header>
+      <header><div><p class="eyebrow">BROWSER ACCOUNT</p><h2 id="onlineAccountTitle">在线账号登录</h2></div><span class="caption">独立 Profile · 登录后保持在线</span></header>
       <form id="onlineAccountForm" class="online-account-fields">
         <div id="onlineAccountFields" class="form-grid">
-          <label>????<input name="name" required maxlength="120" placeholder="pip-new-account"></label>
-          <label>????<input name="max_concurrency" type="number" min="1" max="50" value="1" required></label>
-          <label class="wide">????<input name="proxy_url" class="mono" required placeholder="socks5://host.docker.internal:20001"></label>
-          <button class="button primary" type="submit">?????????</button>
+          <label>账号名称<input name="name" required maxlength="120" placeholder="pip-new-account"></label>
+          <label>并发上限<input name="max_concurrency" type="number" min="1" max="50" value="1" required></label>
+          <label class="wide">账号代理<input name="proxy_url" class="mono" required placeholder="socks5://host.docker.internal:20001"></label>
+          <button class="button primary" type="submit">创建并打开浏览器</button>
         </div>
       </form>
-      <p id="onlineAccountMessage" role="status">?????????????????? Profile ????</p>
-      <iframe id="onlineAccountFrame" title="???????" src="about:blank" allow="clipboard-read; clipboard-write"></iframe>
-      <footer><button class="button" id="onlineAccountCancel" type="button">????</button><button class="button primary" id="onlineAccountFinish" type="button" hidden>???????</button></footer>
+      <p id="onlineAccountMessage" role="status">登录后进入视频项目，再点击“完成登录并验证”。浏览器会保持在线。</p>
+      <iframe id="onlineAccountFrame" title="账号浏览器" src="about:blank" allow="clipboard-read; clipboard-write"></iframe>
+      <footer><button class="button" id="onlineAccountCancel" type="button">取消</button><button class="button primary" id="onlineAccountFinish" type="button" hidden>完成登录并验证</button></footer>
     </div>
   </dialog>
   <dialog id="accountDialog"><form class="dialog-form" id="accountForm">
