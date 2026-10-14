@@ -22,6 +22,7 @@ BASE = "https://www.pippit.ai"
 _PROCESS_LOCK = threading.RLock()
 _PROCESSES: dict[int, subprocess.Popen[Any]] = {}
 _UPLOAD_LOCKS: dict[int, threading.RLock] = {}
+_UPLOAD_TAB_URL = BASE + "/home#pip2api-upload"
 
 
 class BrowserError(Exception):
@@ -60,6 +61,42 @@ def _page(port: int) -> dict[str, Any]:
     if pages:
         return pages[0]
     raise BrowserError("open and log in to www.pippit.ai in the account browser")
+
+
+def _upload_page(port: int) -> dict[str, Any]:
+    """Use a home composer tab without moving the account's current project tab."""
+    pages = [item for item in _targets(port) if item.get("type") == "page" and
+             urllib.parse.urlsplit(item.get("url") or "").hostname == "www.pippit.ai"]
+    home = [item for item in pages if urllib.parse.urlsplit(item.get("url") or "").path == "/home"]
+    if home:
+        home.sort(key=lambda item: urllib.parse.urlsplit(item.get("url") or "").fragment != "pip2api-upload")
+        return home[0]
+    # Target.createTarget is issued through the existing page so its cookies and
+    # account proxy remain the same. A separate tab preserves an open project.
+    source = _page(port)
+    ws = websocket.create_connection(source["webSocketDebuggerUrl"], timeout=10,
+                                     suppress_origin=True)
+    try:
+        ws.send(json.dumps({"id": 1, "method": "Target.createTarget",
+                            "params": {"url": _UPLOAD_TAB_URL, "background": True}}))
+        while True:
+            reply = json.loads(ws.recv())
+            if reply.get("id") == 1:
+                if reply.get("error") or not (reply.get("result") or {}).get("targetId"):
+                    raise BrowserError("Pippit upload home tab could not be opened")
+                target_id = reply["result"]["targetId"]
+                break
+    except (OSError, websocket.WebSocketException) as exc:
+        raise BrowserError("Pippit upload home tab could not be opened") from exc
+    finally:
+        ws.close()
+    until = time.monotonic() + 20
+    while time.monotonic() < until:
+        target = next((item for item in _targets(port) if item.get("id") == target_id), None)
+        if target and target.get("webSocketDebuggerUrl"):
+            return target
+        time.sleep(.2)
+    raise BrowserError("Pippit upload home tab did not become available")
 
 
 def browser_alive(port: int) -> bool:
@@ -279,7 +316,7 @@ class CDPBrowser:
             return self._upload_file_locked(path)
 
     def _upload_file_locked(self, path: Path) -> dict[str, Any]:
-        target = _page(self.port)
+        target = _upload_page(self.port)
         ws = websocket.create_connection(target["webSocketDebuggerUrl"], timeout=90,
                                          suppress_origin=True)
         sequence = 0
@@ -309,8 +346,8 @@ class CDPBrowser:
                     "y": point["y"], "button": "left", "clickCount": 1})
 
         def clear_composer_attachments() -> None:
-            count_js = "document.querySelectorAll('[data-slot=\"prompt-composer\"] [data-slot=\"attachment-preview-media-shell\"]').length"
-            click_js = "(()=>{const x=document.querySelector('[data-slot=\"prompt-composer\"] [data-slot=\"attachment-preview-remove-button\"]');x?.click();return !!x})()"
+            count_js = "document.querySelectorAll('[data-pip2api-upload-composer=\"1\"] [data-slot=\"attachment-preview-media-shell\"]').length"
+            click_js = "(()=>{const x=document.querySelector('[data-pip2api-upload-composer=\"1\"] [data-slot=\"attachment-preview-remove-button\"]');x?.click();return !!x})()"
             for _ in range(50):
                 count = int(evaluate(count_js) or 0)
                 if count == 0:
@@ -336,13 +373,27 @@ class CDPBrowser:
         try:
             command("Page.enable")
             command("Network.enable")
+            until_ready = time.monotonic() + 35
+            while time.monotonic() < until_ready:
+                ready = evaluate("""(()=>{document.querySelectorAll('[data-pip2api-upload-composer]')
+                  .forEach(x=>x.removeAttribute('data-pip2api-upload-composer'));
+                  const composer=[...document.querySelectorAll('[data-slot="prompt-composer"]')]
+                    .find(x=>{const r=x.getBoundingClientRect();return r.width>0&&r.height>0&&
+                      !!x.querySelector('[data-slot="prompt-composer-resource-runtime"] input[type="file"][multiple]')});
+                  if(!composer)return false;
+                  composer.setAttribute('data-pip2api-upload-composer','1');return true})()""")
+                if ready:
+                    break
+                time.sleep(.3)
+            else:
+                raise BrowserError("Pippit home upload composer is unavailable")
             clear_composer_attachments()
             # Current Pippit keeps its composer input mounted even when the upload
             # dropdown does not open. Setting this input dispatches the same change
             # event as the browser file picker and preserves the account's proxy.
             root = command("DOM.getDocument").get("root", {}).get("nodeId")
             node = command("DOM.querySelector", {"nodeId": root,
-                "selector": '[data-slot="prompt-composer-resource-runtime"] input[type="file"][multiple]'})
+                "selector": '[data-pip2api-upload-composer="1"] [data-slot="prompt-composer-resource-runtime"] input[type="file"][multiple]'})
             input_node_id = node.get("nodeId")
             if input_node_id:
                 command("DOM.setFileInputFiles", {"files": [str(path.resolve())],
