@@ -286,7 +286,18 @@ class Service:
                 self.store.update_task(task_id, {"account_id": account_id, "status": "preparing", "progress": 5})
                 account, owned = self.browser_runtime.acquire(account)
                 client = PippitClient(account, store=self.store)
-                before = client.account_state()["available_balance"]
+                # After a container restart CDP exposes /home before Pippit's
+                # application has finished loading. Its first browser fetch
+                # can fail even though the persisted login is still valid.
+                for attempt in range(12):
+                    try:
+                        before = client.account_state()["available_balance"]
+                        break
+                    except BrowserError as exc:
+                        if "JavaScript request failed" not in str(exc) or attempt == 11:
+                            raise
+                        if self._stop.wait(2):
+                            return
                 self.store.update_account(account_id, {"balance": before, "status": "active"})
                 self.store.update_task(task_id, {"balance_before": before, "progress": 12})
                 assets = client.upload_inputs(task["normalized"])
