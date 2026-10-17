@@ -302,7 +302,10 @@ class BrowserLoginManager:
                 state = await asyncio.to_thread(client.account_state)
                 project_id = client.browser.project_id()
                 if REQUIRES_PROJECT and not (project_id or account["project_id"]):
-                    raise LoginError("open a Pippit video project before finishing login")
+                    try:
+                        project_id = await asyncio.to_thread(client.browser.ensure_project_id)
+                    except BrowserError as exc:
+                        raise LoginError(str(exc)) from exc
                 try:
                     watermark_status = await asyncio.to_thread(client.ensure_no_watermark)
                 except (BrowserError, PippitError) as exc:

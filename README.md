@@ -4,7 +4,7 @@ PIP2API exposes Pippit's logged-in web video workflow as a task API. The managem
 
 ## Deployment
 
-Copy `.env.example` to `.env` and set unique `PIP_API_KEY` and `PIP_ADMIN_TOKEN` values. Start with `docker compose up -d`. The console is on port `8807` by default; `/health` is unauthenticated. Use **在线添加账号** with a name and account proxy, then log in through the embedded noVNC browser, open a video project, and click **完成登录并验证**. The account row's **网页登录** action reconnects to the same Chrome. The verified browser stays running and its CDP session is used by task submission, polling, credit checks, and daily check-in. After a service restart, the browser is restored from its persisted profile.
+Copy `.env.example` to `.env` and set unique `PIP_API_KEY` and `PIP_ADMIN_TOKEN` values. Start with `docker compose up -d`. The console is on port `8807` by default; `/health` is unauthenticated. Use **在线添加账号** with a name and account proxy, then log in through the embedded noVNC browser and click **完成登录并验证**. Verification opens an empty Canvas project automatically when the account is still on the Pippit home page; it does not submit a paid task. The account row's **网页登录** action reconnects to the same Chrome. The verified browser stays running and its CDP session is used by task submission, polling, credit checks, and daily check-in. After a service restart, the browser is restored from its persisted profile.
 
 During online login verification, PIP2API reads the account's Pippit watermark setting and enables the no-watermark option if the plan allows it. It reads the setting again before enabling the account. If the plan requires a watermark, login still completes and the console reports that limitation.
 

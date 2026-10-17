@@ -224,7 +224,7 @@ class PippitClient:
 
     def upload_inputs(self, normalized: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         proxy = str(self.account.get("proxy_url") or "")
-        project_id = str(self.account.get("project_id") or self.browser.project_id())
+        project_id = str(self.account.get("project_id") or self.browser.ensure_project_id())
         result: dict[str, list[dict[str, Any]]] = {}
         for kind in ("images", "videos", "audios"):
             result[kind] = []
@@ -315,7 +315,7 @@ class PippitClient:
                 "time_range": None, "security_check_scene": None}
 
     def submit(self, normalized: dict[str, Any], assets: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-        project_id = str(self.account.get("project_id") or self.browser.project_id())
+        project_id = str(self.account.get("project_id") or self.browser.ensure_project_id())
         if not project_id.isdigit():
             raise PippitError("open a Pippit video project before submitting")
         param = build_video_param(normalized, assets)

@@ -296,6 +296,33 @@ class CDPBrowser:
         value = self.evaluate("new URL(location.href).searchParams.get('projectId')||''")
         return str(value or "")
 
+    def ensure_project_id(self) -> str:
+        """Open an empty Canvas project from the logged-in home page if needed."""
+        project_id = self.project_id()
+        if project_id.isdigit():
+            return project_id
+        path = self.evaluate("location.pathname")
+        if path == "/home":
+            opened = self.evaluate("""(()=>{
+              const button = Array.from(document.querySelectorAll(
+                'button[data-slot="sidebar-menu-button"]')).find(item =>
+                  /^(Canvas|画布)$/.test((item.innerText || '').trim()));
+              if (!button || button.disabled) return false;
+              button.click();
+              return true;
+            })()""")
+            if not opened:
+                raise BrowserError("open a Pippit video project in the account browser")
+        elif path != "/nest-agent-project":
+            raise BrowserError("open a Pippit video project in the account browser")
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            project_id = self.project_id()
+            if project_id.isdigit():
+                return project_id
+            time.sleep(.5)
+        raise BrowserError("Pippit video project did not finish opening")
+
     def user_info(self) -> dict[str, str]:
         """Read the logged-in web identity injected by Pippit into its page."""
         result = self.evaluate("""(()=>{let d=JSON.parse(window.__businessUserInfoStringify||'{}').data||{};

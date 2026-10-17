@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from app.browser import BrowserError
+from app.browser import BrowserError, CDPBrowser
 from app.browser_login import BrowserLoginManager, LoginError
 from app.service import Service
 from app.store import Store
@@ -44,6 +44,13 @@ class BrowserRuntimeTests(unittest.TestCase):
             stop.assert_not_called()
             runtime.close_idle(self.account['id'])
             stop.assert_called_once_with(self.account['id'])
+
+    def test_home_opens_empty_canvas_project(self):
+        browser = CDPBrowser(29999)
+        with patch.object(browser, 'project_id', side_effect=['', '', '456']), \
+             patch.object(browser, 'evaluate', side_effect=['/home', True]) as evaluate:
+            self.assertEqual(browser.ensure_project_id(), '456')
+        self.assertIn('sidebar-menu-button', evaluate.call_args_list[1].args[0])
 
 
 class OnlineLoginTests(unittest.IsolatedAsyncioTestCase):
@@ -121,3 +128,25 @@ class OnlineLoginTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(LoginError):
                 await self.manager.start(self.account['id'])
         self.assertEqual(self.store.account(self.account['id'])['status'], 'pending')
+
+    async def test_login_opens_project_for_new_account(self):
+        desktop = Mock()
+        desktop.cdp_port = 29999
+        desktop.vnc_port = 29998
+        desktop.password = 'test'
+        desktop.alive.return_value = True
+        desktop.start = Mock(return_value=asyncio.sleep(0))
+        desktop.close = Mock(return_value=asyncio.sleep(0))
+        client = Mock()
+        client.account_state.return_value = {'available_balance': 123, 'buckets': {}}
+        client.browser.project_id.return_value = ''
+        client.browser.ensure_project_id.return_value = '456'
+        client.ensure_no_watermark.return_value = 'enabled'
+        with patch('app.browser_login.LoginDesktop', return_value=desktop), \
+             patch('app.browser_login.UpstreamClient', return_value=client), \
+             patch.object(self.service.browser_runtime, 'close_idle'):
+            session = await self.manager.start(self.account['id'])
+            result = await self.manager.finish(session['active']['session_id'])
+        self.assertTrue(result['enabled'])
+        self.assertEqual(result['project_id'], '456')
+        client.browser.ensure_project_id.assert_called_once_with()
