@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import threading
 import time
 import uuid
@@ -22,6 +23,21 @@ from .store import Store
 
 
 TERMINAL = {"succeeded", "failed", "expired"}
+MAX_CREDIT_ACCOUNT_ATTEMPTS = 2
+logger = logging.getLogger(__name__)
+
+
+class AccountCreditRejected(Exception):
+    """The upstream explicitly rejected this account after a terminal result."""
+
+
+def _credit_rejected(message: str) -> bool:
+    value = message.lower()
+    return any(token in value for token in (
+        "credit not enough", "credits not enough", "not enough credits",
+        "insufficient credits", "insufficient balance"))
+
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "task_workers": 10,
     "task_queue_capacity": 100,
@@ -190,10 +206,15 @@ class Service:
         self._pool.submit(self._run, task_id)
         return self.public_task(task)
 
-    def _reserve_account(self, estimated_cost: float = 0) -> dict[str, Any] | None:
+    def _reserve_account(self, estimated_cost: float = 0, *,
+                         exclude_ids: set[int] | None = None) -> dict[str, Any] | None:
+        excluded = exclude_ids or set()
         with self._lock:
+            if sum(self._active.values()) >= int(self.settings()["task_workers"]):
+                return None
             accounts = [item for item in self.store.accounts(private=True)
-                        if item["enabled"] and item["status"] == "active" and item["proxy_url"]
+                        if int(item["id"]) not in excluded and item["enabled"]
+                        and item["status"] == "active" and item["proxy_url"]
                         and (item["balance"] is None or float(item["balance"]) >= estimated_cost)]
             accounts.sort(key=lambda item: (-int(item["priority"]), -(float(item["balance"] or 0)), item["id"]))
             for account in accounts:
@@ -204,6 +225,12 @@ class Service:
                 self._active[account_id] = active + 1
                 return account
         return None
+
+    def _has_eligible_account(self, estimated_cost: float, excluded: set[int]) -> bool:
+        return any(int(item["id"]) not in excluded and item["enabled"]
+                   and item["status"] == "active" and item["proxy_url"]
+                   and (item["balance"] is None or float(item["balance"]) >= estimated_cost)
+                   for item in self.store.accounts(private=True))
 
     def _release_account(self, account_id: int) -> None:
         with self._lock:
@@ -267,61 +294,94 @@ class Service:
             time.sleep(1)
         else:
             return
-        account = None
-        account_deadline = time.monotonic() + int(self.settings()["task_timeout_seconds"])
-        while not account and time.monotonic() < account_deadline and not self._stop.is_set():
-            account = self._reserve_account(float(task.get("estimated_cost") or 0))
-            if not account:
-                time.sleep(1)
-        if not account:
-            self._fail(task_id, "ACCOUNT_POOL_UNAVAILABLE", "no available Pippit account before timeout")
-            self._worker_slots.release()
-            return
-        account_id = int(account["id"])
-        owned = False
+        estimated_cost = float(task.get("estimated_cost") or 0)
+        attempted = list(task["attempted_account_ids"])
+        credit_reason = task.get("error_message") or "Pippit account has insufficient credits"
         try:
-            with account_media_lock(account_id):
-                if self._stop.is_set():
+            while not self._stop.is_set():
+                if len(attempted) >= MAX_CREDIT_ACCOUNT_ATTEMPTS:
+                    self._fail(task_id, "INSUFFICIENT_CREDITS", credit_reason)
                     return
-                self.store.update_task(task_id, {"account_id": account_id, "status": "preparing", "progress": 5})
-                account, owned = self.browser_runtime.acquire(account)
-                client = PippitClient(account, store=self.store)
-                # After a container restart CDP exposes /home before Pippit's
-                # application has finished loading. Its first browser fetch
-                # can fail even though the persisted login is still valid.
-                for attempt in range(12):
-                    try:
-                        before = client.account_state()["available_balance"]
+                account = None
+                account_deadline = time.monotonic() + int(self.settings()["task_timeout_seconds"])
+                while not self._stop.is_set() and time.monotonic() < account_deadline:
+                    account = self._reserve_account(estimated_cost, exclude_ids=set(attempted))
+                    if account or (attempted and not self._has_eligible_account(
+                            estimated_cost, set(attempted))):
                         break
-                    except BrowserError as exc:
-                        if "JavaScript request failed" not in str(exc) or attempt == 11:
-                            raise
-                        if self._stop.wait(2):
-                            return
-                self.store.update_account(account_id, {"balance": before, "status": "active"})
-                self.store.update_task(task_id, {"balance_before": before, "progress": 12})
-                assets = client.upload_inputs(task["normalized"])
-                self.store.update_task(task_id, {"progress": 30})
+                    self._stop.wait(1)
+                if not account:
+                    code = "INSUFFICIENT_CREDITS" if attempted else "ACCOUNT_POOL_UNAVAILABLE"
+                    message = credit_reason if attempted else "no available Pippit account before timeout"
+                    self._fail(task_id, code, message)
+                    return
+                account_id = int(account["id"])
+                owned = False
                 try:
-                    submitted = client.submit(task["normalized"], assets)
-                except BrowserRejected as exc:
-                    self._fail(task_id, "UPSTREAM_REJECTED", str(exc))
+                    with account_media_lock(account_id):
+                        if self._stop.is_set():
+                            return
+                        self.store.update_task(task_id, {"account_id": account_id,
+                            "status": "preparing", "progress": 5, "balance_before": None,
+                            "run_id": "", "thread_id": "", "error_code": "", "error_message": ""})
+                        account, owned = self.browser_runtime.acquire(account)
+                        client = PippitClient(account, store=self.store)
+                        # A just-started Chrome can expose CDP before the app is ready.
+                        for attempt in range(12):
+                            try:
+                                before = client.account_state()["available_balance"]
+                                break
+                            except BrowserError as exc:
+                                if "JavaScript request failed" not in str(exc) or attempt == 11:
+                                    raise
+                                if self._stop.wait(2):
+                                    return
+                        self.store.update_account(account_id, {"balance": before, "status": "active"})
+                        self.store.update_task(task_id, {"balance_before": before, "progress": 12})
+                        assets = client.upload_inputs(task["normalized"])
+                        self.store.update_task(task_id, {"progress": 30})
+                        attempted.append(account_id)
+                        self.store.update_task(task_id, {"attempted_account_ids": attempted})
+                        try:
+                            submitted = client.submit(task["normalized"], assets)
+                        except BrowserRejected as exc:
+                            if not _credit_rejected(str(exc)):
+                                self._fail(task_id, "UPSTREAM_REJECTED", str(exc))
+                                return
+                            raise AccountCreditRejected(str(exc)) from exc
+                        except BrowserError as exc:
+                            self._fail(task_id, "UPSTREAM_SUBMIT_OUTCOME_UNKNOWN",
+                                       str(exc) + "; automatic resubmission is disabled")
+                            return
+                        self.store.update_task(task_id, {"status": "submitted", "progress": 40,
+                                                      "run_id": submitted["run_id"],
+                                                      "thread_id": submitted["thread_id"]})
+                    self._poll(task_id, client,
+                               time.monotonic() + int(self.settings()["task_timeout_seconds"]))
                     return
-                except BrowserError as exc:
-                    self._fail(task_id, "UPSTREAM_SUBMIT_OUTCOME_UNKNOWN",
-                               str(exc) + "; automatic resubmission is disabled")
+                except AccountCreditRejected as exc:
+                    credit_reason = str(exc)
+                    self.store.update_account(account_id, {"last_error": credit_reason[:300]})
+                    logger.warning("PIP task %s credit rejection on account %s (attempt %s/%s)",
+                                   task_id, account_id, len(attempted), MAX_CREDIT_ACCOUNT_ATTEMPTS)
+                    if len(attempted) >= MAX_CREDIT_ACCOUNT_ATTEMPTS:
+                        self._fail(task_id, "INSUFFICIENT_CREDITS", credit_reason)
+                        return
+                    self.store.update_task(task_id, {"status": "queued", "progress": 0,
+                        "account_id": None, "run_id": "", "thread_id": "",
+                        "balance_before": None, "error_code": "INSUFFICIENT_CREDITS",
+                        "error_message": credit_reason})
+                    continue
+                except (BrowserError, PippitError, MediaError, ValueError) as exc:
+                    self._fail(task_id, type(exc).__name__.upper(), str(exc))
                     return
-                self.store.update_task(task_id, {"status": "submitted", "progress": 40,
-                                                  "run_id": submitted["run_id"],
-                                                  "thread_id": submitted["thread_id"]})
-            self._poll(task_id, client, time.monotonic() + int(self.settings()["task_timeout_seconds"]))
-        except (BrowserError, PippitError, MediaError, ValueError) as exc:
-            self._fail(task_id, type(exc).__name__.upper(), str(exc))
-        except Exception as exc:
-            self._fail(task_id, "INTERNAL_ERROR", f"{type(exc).__name__}: {exc}")
+                except Exception as exc:
+                    self._fail(task_id, "INTERNAL_ERROR", f"{type(exc).__name__}: {exc}")
+                    return
+                finally:
+                    self.browser_runtime.release(account, owned)
+                    self._release_account(account_id)
         finally:
-            self.browser_runtime.release(account, owned)
-            self._release_account(account_id)
             self._worker_slots.release()
 
     def _resume_poll(self, task_id: str) -> None:
@@ -336,16 +396,33 @@ class Service:
         with self._lock:
             self._active[int(task["account_id"])] = self._active.get(int(task["account_id"]), 0) + 1
         owned = False
+        retry_on_other_account = False
         try:
             account, owned = self.browser_runtime.acquire(account)
             self._poll(task_id, PippitClient(account),
                        time.monotonic() + int(self.settings()["task_timeout_seconds"]))
+        except AccountCreditRejected as exc:
+            attempted = list(task["attempted_account_ids"])
+            if int(task["account_id"]) not in attempted:
+                attempted.append(int(task["account_id"]))
+            reason = str(exc)
+            self.store.update_account(int(task["account_id"]), {"last_error": reason[:300]})
+            if len(attempted) >= MAX_CREDIT_ACCOUNT_ATTEMPTS:
+                self._fail(task_id, "INSUFFICIENT_CREDITS", reason)
+            else:
+                self.store.update_task(task_id, {"status": "queued", "progress": 0,
+                    "account_id": None, "run_id": "", "thread_id": "",
+                    "attempted_account_ids": attempted, "balance_before": None,
+                    "error_code": "INSUFFICIENT_CREDITS", "error_message": reason})
+                retry_on_other_account = True
         except Exception as exc:
             self._fail(task_id, type(exc).__name__.upper(), str(exc))
         finally:
             self.browser_runtime.release(account, owned)
             self._release_account(int(task["account_id"]))
             self._worker_slots.release()
+        if retry_on_other_account and not self._stop.is_set():
+            self._pool.submit(self._run, task_id)
 
     def _poll(self, task_id: str, client: PippitClient, deadline: float) -> None:
         errors = 0
@@ -388,6 +465,8 @@ class Service:
                 return
             if state["status"] == "failed":
                 reason = state["error"] or "Pippit video generation failed"
+                if _credit_rejected(reason):
+                    raise AccountCreditRejected(reason)
                 upstream_code = state.get("error_code") or ""
                 if upstream_code in {"12009", "12011"}:
                     code = "CONTENT_MODERATION_FAILED"

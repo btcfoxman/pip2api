@@ -58,6 +58,7 @@ class Store:
                     media_inputs_json TEXT NOT NULL DEFAULT '[]',
                     thread_id TEXT NOT NULL DEFAULT '',
                     run_id TEXT NOT NULL DEFAULT '',
+                    attempted_account_ids_json TEXT NOT NULL DEFAULT '[]',
                     error_code TEXT NOT NULL DEFAULT '',
                     error_message TEXT NOT NULL DEFAULT '',
                     estimated_cost REAL NOT NULL DEFAULT 0,
@@ -87,6 +88,8 @@ class Store:
                 db.execute("ALTER TABLE accounts ADD COLUMN managed_profile INTEGER NOT NULL DEFAULT 0")
             if "priority" not in {row[1] for row in db.execute("PRAGMA table_info(accounts)")}:
                 db.execute("ALTER TABLE accounts ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+            if "attempted_account_ids_json" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
+                db.execute("ALTER TABLE tasks ADD COLUMN attempted_account_ids_json TEXT NOT NULL DEFAULT '[]'")
         try:
             self.path.chmod(0o600)
         except OSError:
@@ -113,6 +116,7 @@ class Store:
     @staticmethod
     def _task(row: sqlite3.Row) -> dict[str, Any]:
         value = dict(row)
+        value["attempted_account_ids"] = json.loads(value.pop("attempted_account_ids_json"))
         value["request"] = json.loads(value.pop("request_json"))
         value["normalized"] = json.loads(value.pop("normalized_json"))
         value["result_urls"] = json.loads(value.pop("result_json"))
@@ -280,6 +284,8 @@ class Store:
             "balance_before", "balance_after", "completed_at"}}
         if "result_urls" in values:
             data["result_json"] = _json(values["result_urls"])
+        if "attempted_account_ids" in values:
+            data["attempted_account_ids_json"] = _json(values["attempted_account_ids"])
         data["updated_at"] = time.time()
         with self._lock, self._connect() as db:
             db.execute("UPDATE tasks SET " + ",".join(f"{key}=?" for key in data) + " WHERE id=?",
