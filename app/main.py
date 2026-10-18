@@ -19,7 +19,7 @@ from .browser import BrowserError, CDPBrowser, browser_alive, clear_managed_prof
 from .browser_login import BrowserLoginManager, LoginError
 from .browser_login_api import register_browser_login
 from .catalog import public_models
-from .service import Service
+from .service import AccountPoolUnavailable, Service
 from .store import Store
 
 
@@ -410,6 +410,9 @@ def integration_docs() -> PlainTextResponse:
 def _create(body: dict[str, Any]) -> dict[str, Any]:
     try:
         result = service.create(body)
+    except AccountPoolUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc),
+                            headers={"X-PIPAPI-Submit-Outcome": "not-accepted"}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc),
                             headers={"X-PIPAPI-Submit-Outcome": "not-accepted"}) from exc

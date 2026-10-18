@@ -42,7 +42,7 @@ Prompt references such as `视频1`, `video2`, `v3`, `视4`, `图片1`, `图1`, 
 
 ## Operations
 
-- Account concurrency defaults to 1 and can be changed to at most 50. Global workers and queue capacity are configured in the console. Queue overflow returns HTTP 429 before upstream submission.
+- Account concurrency defaults to 1 and can be changed to at most 50. Global workers and queue capacity are configured in the console. Queue overflow returns HTTP 429 before upstream submission. If no enabled account can accept the task, submission immediately returns HTTP 503 with `X-PIPAPI-Submit-Outcome: not-accepted`; busy eligible accounts may still queue tasks.
 - A complete upstream rejection is recorded as `UPSTREAM_REJECTED`. An interrupted submit with unknown outcome is recorded as `UPSTREAM_SUBMIT_OUTCOME_UNKNOWN`; it is never automatically resubmitted.
 - The daily credit claim is optional. Enable it in runtime settings or click the account check-in endpoint. Each account is claimed at most once per Taiwan calendar day.
 - Media download first uses a direct connection, then the account or fallback proxy. Browser upload uses the logged-in Chromium tab. The service does not need a Pippit Skills key.

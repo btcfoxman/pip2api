@@ -31,6 +31,10 @@ class AccountCreditRejected(Exception):
     """The upstream explicitly rejected this account after a terminal result."""
 
 
+class AccountPoolUnavailable(Exception):
+    """No enabled account can accept a new task before upstream submission."""
+
+
 def _credit_rejected(message: str) -> bool:
     value = message.lower()
     return any(token in value for token in (
@@ -190,10 +194,6 @@ class Service:
         settings = self.settings()
         if not bool(settings["allow_video_reference_inputs"]) and normalized["videos"]:
             raise ValueError("video reference inputs are disabled by service settings")
-        if self.store.active_count() >= int(settings["task_workers"]) + int(settings["task_queue_capacity"]):
-            raise RuntimeError("PIPAPI queue is full")
-        task_id = "pip_" + uuid.uuid4().hex[:16]
-        task = self.store.create_task(task_id, request, normalized)
         estimates = [item for item in self.store.model_costs() if
                      item["model"] == normalized["model"] and
                      item["duration"] == normalized["duration"] and
@@ -201,8 +201,15 @@ class Service:
                      item["image_count"] == len(normalized["images"]) and
                      item["video_count"] == len(normalized["videos"]) and
                      item["audio_count"] == len(normalized["audios"])]
+        estimated_cost = max((item["cost"] for item in estimates), default=0)
+        if not self._has_eligible_account(estimated_cost, set()):
+            raise AccountPoolUnavailable("no available Pippit account")
+        if self.store.active_count() >= int(settings["task_workers"]) + int(settings["task_queue_capacity"]):
+            raise RuntimeError("PIPAPI queue is full")
+        task_id = "pip_" + uuid.uuid4().hex[:16]
+        task = self.store.create_task(task_id, request, normalized)
         if estimates:
-            task = self.store.update_task(task_id, {"estimated_cost": max(item["cost"] for item in estimates)})
+            task = self.store.update_task(task_id, {"estimated_cost": estimated_cost})
         self._pool.submit(self._run, task_id)
         return self.public_task(task)
 
@@ -282,9 +289,23 @@ class Service:
         task = self.store.task(task_id)
         if not task or task["status"] != "queued":
             return
+        estimated_cost = float(task.get("estimated_cost") or 0)
+        attempted = list(task["attempted_account_ids"])
+        credit_reason = task.get("error_message") or "Pippit account has insufficient credits"
+        unavailable_code = "INSUFFICIENT_CREDITS" if attempted else "ACCOUNT_POOL_UNAVAILABLE"
+        unavailable_message = credit_reason if attempted else "no available Pippit account"
+        if not self._has_eligible_account(estimated_cost, set(attempted)):
+            self._fail(task_id, unavailable_code, unavailable_message)
+            return
         # The executor is only a waiter/dispatcher.  The configurable limit
         # applies to actual upstream work, not to the number of Python threads.
         while not self._stop.is_set():
+            current = self.store.task(task_id)
+            if not current or current["status"] != "queued":
+                return
+            if not self._has_eligible_account(estimated_cost, set(attempted)):
+                self._fail(task_id, unavailable_code, unavailable_message)
+                return
             if not self._worker_slots.acquire(timeout=1):
                 continue
             with self._lock:
@@ -294,11 +315,11 @@ class Service:
             time.sleep(1)
         else:
             return
-        estimated_cost = float(task.get("estimated_cost") or 0)
-        attempted = list(task["attempted_account_ids"])
-        credit_reason = task.get("error_message") or "Pippit account has insufficient credits"
         try:
             while not self._stop.is_set():
+                current = self.store.task(task_id)
+                if not current or current["status"] != "queued":
+                    return
                 if len(attempted) >= MAX_CREDIT_ACCOUNT_ATTEMPTS:
                     self._fail(task_id, "INSUFFICIENT_CREDITS", credit_reason)
                     return
@@ -306,13 +327,13 @@ class Service:
                 account_deadline = time.monotonic() + int(self.settings()["task_timeout_seconds"])
                 while not self._stop.is_set() and time.monotonic() < account_deadline:
                     account = self._reserve_account(estimated_cost, exclude_ids=set(attempted))
-                    if account or (attempted and not self._has_eligible_account(
-                            estimated_cost, set(attempted))):
+                    if account or not self._has_eligible_account(
+                            estimated_cost, set(attempted)):
                         break
                     self._stop.wait(1)
                 if not account:
                     code = "INSUFFICIENT_CREDITS" if attempted else "ACCOUNT_POOL_UNAVAILABLE"
-                    message = credit_reason if attempted else "no available Pippit account before timeout"
+                    message = credit_reason if attempted else "no available Pippit account"
                     self._fail(task_id, code, message)
                     return
                 account_id = int(account["id"])
