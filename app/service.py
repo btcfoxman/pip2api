@@ -493,6 +493,12 @@ class Service:
                     code = "CONTENT_MODERATION_FAILED"
                 elif "video editing task" in reason.lower():
                     code = "VIDEO_EDIT_CONSTRAINT"
+                elif (upstream_code == "10001" and
+                      "agent callback execute failed: submit generatevideo failed" in reason.lower()):
+                    # The agent run is terminal, but its callback does not
+                    # establish whether a video job was accepted. Never
+                    # resubmit automatically on this ambiguous boundary.
+                    code = "UPSTREAM_TEMPORARY"
                 elif upstream_code == "99999":
                     code = "UPSTREAM_TEMPORARY"
                 else:

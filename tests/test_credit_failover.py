@@ -77,6 +77,24 @@ def test_ambiguous_submit_outcome_does_not_switch(tmp_path):
     service.stop()
 
 
+def test_terminal_agent_callback_failure_is_temporary_without_resubmission(tmp_path):
+    store, service, accounts, clients = _setup(tmp_path)
+    clients[accounts[0]].poll.return_value = {
+        "status": "failed", "error_code": "10001",
+        "error": "agent callback execute failed: submit GenerateVideo failed",
+    }
+
+    _run(service, clients)
+
+    task = store.task("pip_credit_test")
+    assert task["status"] == "failed"
+    assert task["error_code"] == "UPSTREAM_TEMPORARY"
+    assert clients[accounts[0]].submit.call_count == 1
+    assert clients[accounts[1]].submit.call_count == 0
+    assert service.public_task(task)["error"]["message"] == "上游维护中，请稍后再试~"
+    service.stop()
+
+
 def test_resumed_terminal_credit_failure_requeues_same_task(tmp_path):
     store, service, accounts, clients = _setup(tmp_path)
     store.update_task("pip_credit_test", {"status": "submitted", "account_id": accounts[0],

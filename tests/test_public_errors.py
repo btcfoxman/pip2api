@@ -13,6 +13,8 @@ def test_historical_pippit_failures_are_classified_for_callers():
          "VIDEO_EDIT_CONSTRAINT"),
         ("UPSTREAM_SUBMIT_OUTCOME_UNKNOWN", "browser disconnected",
          "UPSTREAM_SUBMIT_OUTCOME_UNKNOWN"),
+        ("UPSTREAM_FAILED", "agent callback execute failed: submit GenerateVideo failed",
+         "UPSTREAM_TEMPORARY"),
     )
     for old_code, upstream_message, expected_code in cases:
         normalized = public_error(old_code, upstream_message)

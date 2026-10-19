@@ -6,6 +6,9 @@ from __future__ import annotations
 def public_error(code: str, message: str) -> dict[str, str]:
     raw = (message or "").lower()
     kind = (code or "").upper()
+    if (kind == "UPSTREAM_TEMPORARY" or
+            "agent callback execute failed: submit generatevideo failed" in raw):
+        return {"code": "UPSTREAM_TEMPORARY", "message": "上游维护中，请稍后再试~"}
     if kind == "CONTENT_MODERATION_FAILED" or any(token in raw for token in (
         "'code': 12009", "'code': 12011", "content did not meet platform requirements",
         "output video may contain inappropriate content",
