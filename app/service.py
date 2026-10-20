@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import logging
+import statistics
 import threading
 import time
 import uuid
@@ -40,6 +41,34 @@ def _credit_rejected(message: str) -> bool:
     return any(token in value for token in (
         "credit not enough", "credits not enough", "not enough credits",
         "insufficient credits", "insufficient balance"))
+
+
+def _estimate_cost(normalized: dict[str, Any], costs: list[dict[str, Any]]) -> float:
+    """Use observed credits per second when exact media counts have no quote.
+
+    The fallback is limited to observations with the same model, resolution,
+    video count and audio count. It applies only when several durations show a
+    stable rate, so image-count variants cannot invent a price from one task.
+    """
+    comparable = [item for item in costs if
+                  item["model"] == normalized["model"] and
+                  item["resolution"] == normalized["resolution"] and
+                  item["video_count"] == len(normalized["videos"]) and
+                  item["audio_count"] == len(normalized["audios"])]
+    exact = [item for item in comparable if
+             item["duration"] == normalized["duration"] and
+             item["image_count"] == len(normalized["images"])]
+    if exact:
+        return max(float(item["cost"]) for item in exact)
+    observations = [item for item in comparable if
+                    float(item["cost"]) > 0 and int(item["duration"]) > 0]
+    if len(observations) < 3 or len({item["duration"] for item in observations}) < 2:
+        return 0.0
+    rates = [float(item["cost"]) / int(item["duration"]) for item in observations]
+    rate = statistics.median(rates)
+    if any(abs(sample - rate) > rate * 0.05 for sample in rates):
+        return 0.0
+    return round(rate * int(normalized["duration"]), 2)
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -194,21 +223,14 @@ class Service:
         settings = self.settings()
         if not bool(settings["allow_video_reference_inputs"]) and normalized["videos"]:
             raise ValueError("video reference inputs are disabled by service settings")
-        estimates = [item for item in self.store.model_costs() if
-                     item["model"] == normalized["model"] and
-                     item["duration"] == normalized["duration"] and
-                     item["resolution"] == normalized["resolution"] and
-                     item["image_count"] == len(normalized["images"]) and
-                     item["video_count"] == len(normalized["videos"]) and
-                     item["audio_count"] == len(normalized["audios"])]
-        estimated_cost = max((item["cost"] for item in estimates), default=0)
+        estimated_cost = _estimate_cost(normalized, self.store.model_costs())
         if not self._has_eligible_account(estimated_cost, set()):
             raise AccountPoolUnavailable("no available Pippit account")
         if self.store.active_count() >= int(settings["task_workers"]) + int(settings["task_queue_capacity"]):
             raise RuntimeError("PIPAPI queue is full")
         task_id = "pip_" + uuid.uuid4().hex[:16]
         task = self.store.create_task(task_id, request, normalized)
-        if estimates:
+        if estimated_cost:
             task = self.store.update_task(task_id, {"estimated_cost": estimated_cost})
         self._pool.submit(self._run, task_id)
         return self.public_task(task)
@@ -290,6 +312,10 @@ class Service:
         if not task or task["status"] != "queued":
             return
         estimated_cost = float(task.get("estimated_cost") or 0)
+        if estimated_cost <= 0:
+            estimated_cost = _estimate_cost(task["normalized"], self.store.model_costs())
+            if estimated_cost > 0:
+                self.store.update_task(task_id, {"estimated_cost": estimated_cost})
         attempted = list(task["attempted_account_ids"])
         credit_reason = task.get("error_message") or "Pippit account has insufficient credits"
         unavailable_code = "INSUFFICIENT_CREDITS" if attempted else "ACCOUNT_POOL_UNAVAILABLE"
