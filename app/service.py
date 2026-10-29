@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .cost_adapter import input_evidence, settle_failed_balance
+
 import os
 import logging
 import statistics
@@ -386,6 +388,7 @@ class Service:
                         self.store.update_account(account_id, {"balance": before, "status": "active"})
                         self.store.update_task(task_id, {"balance_before": before, "progress": 12})
                         assets = client.upload_inputs(task["normalized"])
+                        self.store.update_task(task_id, {"cost_evidence": input_evidence(assets)})
                         self.store.update_task(task_id, {"progress": 30})
                         attempted.append(account_id)
                         self.store.update_task(task_id, {"attempted_account_ids": attempted})
@@ -508,7 +511,8 @@ class Service:
                     "result_urls": state["result_urls"], "balance_after": after,
                     "actual_cost": max(0, float(before) - float(after))
                         if isolated and before is not None and after is not None else None,
-                    "completed_at": finished_at})
+                    "completed_at": finished_at,
+                    "cost_evidence": {"balance_isolated": isolated and before is not None and after is not None}})
                 return
             if state["status"] == "failed":
                 reason = state["error"] or "Pippit video generation failed"
@@ -529,6 +533,7 @@ class Service:
                     code = "UPSTREAM_TEMPORARY"
                 else:
                     code = "UPSTREAM_FAILED"
+                settle_failed_balance(self.store, task, client)
                 self._fail(task_id, code, reason)
                 return
             self.store.update_task(task_id, {"status": "running", "progress": max(45, task["progress"])})

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .cost_adapter import build_observations
+
 import os
 import secrets
 import hashlib
@@ -377,7 +379,7 @@ def admin_tasks(limit: int = 100) -> list[dict[str, Any]]:
     for task in tasks:
         if task["status"] in {"failed", "expired"}:
             task["public_error"] = service.public_task(task)["error"]
-    return tasks
+    return [_with_cost_observations(task) for task in tasks]
 
 
 @app.post("/api/tasks", dependencies=[Depends(admin_auth)])
@@ -390,7 +392,7 @@ def admin_task(task_id: str) -> dict[str, Any]:
     task = _task(task_id)
     if task["status"] in {"failed", "expired"}:
         task["public_error"] = service.public_task(task)["error"]
-    return task
+    return _with_cost_observations(task)
 
 
 @app.delete("/api/tasks", dependencies=[Depends(admin_auth)])
@@ -458,3 +460,18 @@ def create_generic(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
 @app.get("/api/v3/contents/generations/tasks/{task_id}", dependencies=[Depends(api_auth)])
 def get_generic(task_id: str) -> dict[str, Any]:
     return service.public_task(_task(task_id))
+
+
+def _with_cost_observations(task: dict[str, Any]) -> dict[str, Any]:
+    full_task = task
+    return {**task, "cost_observations": [{key: value for key, value in row.items() if not key.startswith("_")}
+                                        for row in build_observations(full_task or task)]}
+
+
+from .cost_reference import install_cost_reference
+
+cost_reference = install_cost_reference(
+    app, service_name="pip2api", database_path=store.path,
+    admin_dependency=admin_auth, adapter=build_observations,
+    token_env="PIP_COST_SYNC_TOKEN",
+)

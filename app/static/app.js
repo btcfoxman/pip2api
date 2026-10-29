@@ -55,16 +55,21 @@ function mediaFromTask(task) {
   const results = (task.result_urls || []).map((url, index) => ({ kind: "video", label: `结果${index + 1}`, url, result: true })); return [...inputs, ...results];
 }
 function taskSpec(task) { const request = task.request || {}; return [task.model, request.duration ? `${request.duration}S` : "", request.resolution, request.aspect_ratio].filter(Boolean).join(" · "); }
+function costObservationCell(task) {
+  return globalThis.TaskCost?.cell(task.id, task.task_cost) || '<span class="cell-sub">未知</span>';
+}
+
 function renderTasks() {
   const items = state.tasks.slice(0, 20); $("#tasksBody").innerHTML = items.map((task) => {
     const media = mediaFromTask(task); const inputs = media.filter((item) => !item.result); const results = media.filter((item) => item.result);
     const result = task.status === "failed" || task.status === "expired" ? `<span class="error-stack"><span class="error-public">响应：${escapeHtml(failureMessage(task))}</span><span class="error-upstream" title="${escapeHtml(task.error_message)}">上游：${escapeHtml(task.error_message || "未知错误")}</span></span>` : `<span class="result-links">${results.map((item) => `<a href="${escapeHtml(item.url)}" target="_blank">视${results.length > 1 ? results.indexOf(item) + 1 : ""}</a>`).join("")}</span>`;
     return `<tr><td><button class="cell-title link-button mono" data-action="detail" data-id="${escapeHtml(task.id)}">${escapeHtml(task.id.slice(0, 20))}</button><span class="cell-sub mono">${escapeHtml((task.channel || "待分配").toUpperCase())}${task.account_id ? ` · #${task.account_id} · ${escapeHtml(task.account_name || "")}` : ""}</span></td>
-      <td class="prompt-cell"><span class="cell-title" title="${escapeHtml(task.prompt)}">${escapeHtml(task.prompt || "-")}</span><span class="task-meta-line"><span class="task-spec">${escapeHtml(taskSpec(task))}</span>${inputs.length ? `<span class="media-text">${inputs.map((item, index) => `<button data-action="media" data-id="${escapeHtml(task.id)}" data-media-index="${index}">${{ image: "图", video: "视", audio: "音" }[item.kind]}${item.label}</button>`).join(" ")}</span>` : ""}</span></td>
+      <td class="prompt-cell"><span class="cell-title" title="${escapeHtml(task.prompt)}">${escapeHtml(task.prompt || "-")}</span><span class="task-meta-line"><span class="task-spec">${escapeHtml(taskSpec(task))}</span>${inputs.length ? `<span class="media-text">${inputs.map((item, index) => `<button data-action="media" data-id="${escapeHtml(task.id)}" data-media-index="${index}">${{ image: "图", video: "视", audio: "音" }[item.kind]}${item.label}</button>`).join(" ")}</span>` : ""}</span></td><td class="task-cost-column">${costObservationCell(task)}</td>
       <td>${badge(task.status)}</td><td><div class="progress-stack"><span class="progress-value"><b class="mono">${task.progress || 0}%</b><span class="progress-track"><i style="width:${Math.min(Number(task.progress || 0), 100)}%"></i></span></span><span class="elapsed">${terminal.has(task.status) ? "耗时" : "已用"} ${elapsed(task)}</span></div></td>
       <td><span class="time-stack"><span>创建 ${fmtTime(task.created_at)}</span><span>更新 ${fmtTime(task.updated_at)}</span></span></td><td>${result}</td></tr>`;
   }).join("");
   $("#tasksEmpty").classList.toggle("show", !items.length); $("#taskCount").textContent = `最近 ${items.length} 条`; $("#metricRunning").textContent = items.filter((item) => !terminal.has(item.status)).length; $("#metricComplete").textContent = items.filter((item) => item.status === "succeeded").length; icons();
+  globalThis.TaskCost?.hydrate(document, {});
 }
 
 function defaultPayload() {
@@ -148,3 +153,6 @@ $("#taskForm").addEventListener("submit", async (event) => { event.preventDefaul
 $("#clearTasks").addEventListener("click", async () => { try { const result = await api("/api/tasks", { method: "DELETE" }); toast(`已清理 ${result.deleted} 个任务`); await refresh(); } catch (error) { toast(error.message, true); } });
 
 icons(); refresh(); setInterval(refresh, 8000);
+
+// Shared task cost presentation: advisory only, independent of generation.
+globalThis.TaskCost?.hydrate(document, {});

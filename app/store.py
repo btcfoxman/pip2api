@@ -286,6 +286,12 @@ class Store:
             data["result_json"] = _json(values["result_urls"])
         if "attempted_account_ids" in values:
             data["attempted_account_ids_json"] = _json(values["attempted_account_ids"])
+        if "cost_evidence" in values:
+            current = self.task(task_id) or {}
+            normalized = dict(current.get("normalized") or {})
+            normalized["_cost_evidence"] = {
+                **normalized.get("_cost_evidence", {}), **values["cost_evidence"]}
+            data["normalized_json"] = _json(normalized)
         data["updated_at"] = time.time()
         with self._lock, self._connect() as db:
             db.execute("UPDATE tasks SET " + ",".join(f"{key}=?" for key in data) + " WHERE id=?",
