@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,7 +12,7 @@ from unittest.mock import patch
 from scripts.build_manifest import build_manifest
 from scripts.deploy_release import (
     DeployError, active_counts, database_host_path, deploy, forbid_code_mounts,
-    wait_for_idle,
+    wait_for_idle, COUNT_SOURCE, BACKUP_SOURCE, backup_database, container_active_counts,
 )
 
 
@@ -97,9 +98,21 @@ class DeploymentFixture:
                         self.task("newly-accepted", "submitted", "accepted-upstream-id")
                 return ""
         if args[:2] == ["docker", "exec"]:
+            if args[5] == COUNT_SOURCE:
+                return json.dumps(active_counts(self.database))
+            if args[5] == BACKUP_SOURCE:
+                with closing(sqlite3.connect(self.database)) as source:
+                    with closing(sqlite3.connect(self.root / "private-container-backup.db")) as target:
+                        source.backup(target)
+                return "/tmp/pip2api-release-fixture.db\n"
+            if "unlink(missing_ok=True)" in args[5]:
+                return ""
             if self.fail_manifest:
                 raise DeployError("source manifest mismatch")
             return "source_manifest_verified"
+        if args[:2] == ["docker", "cp"]:
+            shutil.copyfile(self.root / "private-container-backup.db", args[3])
+            return ""
         if args[:2] == ["docker", "login"]:
             return ""
         raise AssertionError("unexpected deployment operation: " + repr(args[:2]))
@@ -246,6 +259,33 @@ class GuardedDeploymentTests(unittest.TestCase):
 
 
 class DeploymentHelpersTests(unittest.TestCase):
+    def test_container_counts_are_readonly_and_invalid_counts_fail_closed(self):
+        commands = []
+        def response(args):
+            commands.append(args)
+            return '{"submitted": 1, "account_logging_in": 1}'
+        self.assertEqual(container_active_counts('pip2api', response), {"submitted": 1, "account_logging_in": 1})
+        self.assertIn("?mode=ro", commands[0][-1])
+        self.assertIn("PRAGMA query_only=ON", commands[0][-1])
+        self.assertNotIn("app.", commands[0][-1])
+        for invalid in ('[]', '{"running":-1}', '{"running":true}'):
+            with self.subTest(invalid=invalid), self.assertRaises(DeployError):
+                container_active_counts('pip2api', lambda args: invalid)
+
+    def test_container_backup_copy_failure_still_removes_only_its_private_file(self):
+        commands = []
+        def runner(args):
+            commands.append(args)
+            if args[-1] == BACKUP_SOURCE:
+                return '/tmp/pip2api-release-fixture.db'
+            if args[:2] == ['docker', 'cp']:
+                raise DeployError('synthetic copy failure')
+            return ''
+        with tempfile.TemporaryDirectory() as directory, self.assertRaises(DeployError):
+            backup_database('pip2api', Path(directory) / 'db.sqlite3', runner)
+        self.assertIn("Path('/tmp/pip2api-release-fixture.db').unlink(missing_ok=True)", commands[-1][-1])
+        self.assertIn("?mode=ro", commands[0][-1])
+
     def test_zero_samples_are_required_to_be_consecutive(self):
         counts = iter(({}, {"preparing": 1}, {}, {}, {}))
         calls = []

@@ -104,6 +104,59 @@ def active_counts(database: Path) -> dict[str, int]:
         return result
 
 
+COUNT_SOURCE = """
+import json,os,sqlite3
+from pathlib import Path
+path=Path(os.environ.get('PIP_DATA_DIR') or '/app/data')/'pip2api.db'
+with sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=5) as db:
+    db.execute('PRAGMA query_only=ON')
+    states=('queued','preparing','submitting','submitted','running','polling','postprocessing')
+    rows=db.execute('SELECT status,COUNT(*) FROM tasks WHERE status IN ('+','.join('?' for _ in states)+') GROUP BY status',states)
+    result={str(status):int(count) for status,count in rows}
+    if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts'").fetchone():
+        for status,count in db.execute("SELECT status,COUNT(*) FROM accounts WHERE status IN ('logging_in','login_pending','authorizing','verifying') GROUP BY status"):
+            result['account_'+str(status)]=int(count)
+print(json.dumps(result))
+"""
+BACKUP_SOURCE = """
+import os,sqlite3,tempfile
+from pathlib import Path
+path=Path(os.environ.get('PIP_DATA_DIR') or '/app/data')/'pip2api.db'
+with tempfile.NamedTemporaryFile(prefix='pip2api-release-',suffix='.db',delete=False) as f:
+    temporary=Path(f.name)
+try:
+    with sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=5) as source:
+        source.execute('PRAGMA query_only=ON')
+        with sqlite3.connect(temporary) as destination:
+            source.backup(destination)
+    print(str(temporary))
+except BaseException:
+    temporary.unlink(missing_ok=True)
+    raise
+"""
+
+
+def container_active_counts(container: str, runner=run) -> dict[str, int]:
+    # The runner must not need host access to root-owned application data.
+    counts = json.loads(runner(["docker", "exec", container, "python", "-c", COUNT_SOURCE]))
+    if not isinstance(counts, dict) or any(not isinstance(key, str) or type(value) is not int or value < 0 for key, value in counts.items()):
+        raise DeployError("invalid read-only activity count")
+    return counts
+
+
+def backup_database(container: str, destination: Path, runner=run) -> None:
+    temporary = runner(["docker", "exec", container, "python", "-c", BACKUP_SOURCE]).strip()
+    path = PurePosixPath(temporary)
+    if path.parent != PurePosixPath('/tmp') or not path.name.startswith('pip2api-release-') or not path.name.endswith('.db'):
+        raise DeployError("invalid private database backup path")
+    try:
+        runner(["docker", "cp", container + ":" + temporary, str(destination)])
+        destination.chmod(0o600)
+    finally:
+        runner(["docker", "exec", container, "python", "-c",
+                "from pathlib import Path; Path(" + repr(temporary) + ").unlink(missing_ok=True)"])
+
+
 def wait_for_idle(read_counts: Callable[[], dict], timeout: float, *, sleep=time.sleep,
                   clock=time.monotonic, stable_samples: int = 3) -> None:
     deadline, stable = clock() + timeout, 0
@@ -231,13 +284,10 @@ def deploy(*, deploy_path: Path, service: str, container: str, image: str, revis
     published = json.loads(runner(["docker", "image", "inspect", image]))[0]
     if (published["Config"].get("Labels") or {}).get("org.opencontainers.image.revision") != revision:
         raise DeployError("published image OCI revision mismatch")
-    read_counts = lambda: active_counts(database)
+    read_counts = lambda: container_active_counts(container, runner)
     idle_wait(read_counts, idle_timeout)
     ensure_unchanged(before, container, preserved_files, hashes, runner)
-    with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as source:
-        with closing(sqlite3.connect(rollout / "database.sqlite3")) as backup:
-            source.backup(backup)
-    (rollout / "database.sqlite3").chmod(0o600)
+    backup_database(container, rollout / "database.sqlite3", runner)
     # Last guard immediately before restart. Never cancel/fail/requeue live tasks.
     if sum(read_counts().values()):
         raise DeployError("a new task arrived before restart; existing service was preserved")
