@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -88,6 +89,10 @@ class Store:
                 db.execute("ALTER TABLE accounts ADD COLUMN managed_profile INTEGER NOT NULL DEFAULT 0")
             if "priority" not in {row[1] for row in db.execute("PRAGMA table_info(accounts)")}:
                 db.execute("ALTER TABLE accounts ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+            account_columns = {row[1] for row in db.execute("PRAGMA table_info(accounts)")}
+            for name in ("login_user_id", "last_checkin_user_id"):
+                if name not in account_columns:
+                    db.execute(f"ALTER TABLE accounts ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             if "attempted_account_ids_json" not in {row[1] for row in db.execute("PRAGMA table_info(tasks)")}:
                 db.execute("ALTER TABLE tasks ADD COLUMN attempted_account_ids_json TEXT NOT NULL DEFAULT '[]'")
         try:
@@ -111,6 +116,8 @@ class Store:
         value["last_balance"] = value["balance"]
         value["email"] = ""
         value["plan"] = "Pippit"
+        value.pop("login_user_id", None)
+        value.pop("last_checkin_user_id", None)
         return value
 
     @staticmethod
@@ -170,6 +177,9 @@ class Store:
                     cdp_port=:cdp_port,max_concurrency=:max_concurrency,priority=:priority,
                     enabled=:enabled,updated_at=:updated_at WHERE id=:id""",
                     {**values, "updated_at": now, "id": old["id"]})
+                if (values['proxy_url'] != old['proxy_url'] or values['cdp_port'] != old['cdp_port']):
+                    db.execute("UPDATE accounts SET login_user_id='',last_checkin_user_id='',last_checkin_date='' WHERE id=?",
+                               (old['id'],))
                 account_id = int(old["id"])
             else:
                 cursor = db.execute("""INSERT INTO accounts(name,cdp_port,proxy_url,project_id,
@@ -205,7 +215,8 @@ class Store:
             return int(db.execute("""SELECT COUNT(*) FROM tasks WHERE account_id=?
                 AND status IN ('preparing','submitted','running')""", (account_id,)).fetchone()[0])
 
-    def update_account(self, account_id: int, values: dict[str, Any]) -> dict[str, Any]:
+    def update_account(self, account_id: int, values: dict[str, Any], *, login_identity: str | None = None,
+                       checkin_identity: str | None = None, expected: dict[str, Any] | None = None) -> dict[str, Any]:
         allowed = {"name", "cdp_port", "proxy_url", "project_id", "max_concurrency", "priority", "managed_profile",
                    "enabled", "status", "balance", "last_error", "last_checkin_date"}
         data = {key: value for key, value in values.items() if key in allowed}
@@ -217,6 +228,31 @@ class Store:
             data["balance_details_json"] = _json(values["balance_details"])
         data["updated_at"] = time.time()
         with self._lock, self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            old = db.execute('SELECT * FROM accounts WHERE id=?', (account_id,)).fetchone()
+            if old is None:
+                raise KeyError(account_id)
+            if expected is not None and any(old[key] != value for key, value in expected.items()):
+                raise ValueError('account identity changed during daily check-in')
+            reset = ("proxy_url" in data and data['proxy_url'] != old['proxy_url']
+                or data.get('status') == 'profile_resetting'
+                or "managed_profile" in data and bool(data['managed_profile']) != bool(old['managed_profile'])
+                or "cdp_port" in data and int(data['cdp_port']) != int(old['cdp_port'])
+                    and (not old['managed_profile'] or not int(data['cdp_port'] or 0)))
+            if reset:
+                data.update(login_user_id='', last_checkin_user_id='', last_checkin_date='')
+            for identity in (login_identity, checkin_identity):
+                if identity is not None and (not isinstance(identity, str)
+                        or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', identity) or identity == '0'):
+                    raise ValueError('account identity is not verified')
+            if login_identity is not None:
+                if login_identity != old['login_user_id']:
+                    data.update(last_checkin_user_id='', last_checkin_date='')
+                data['login_user_id'] = login_identity
+            if checkin_identity is not None:
+                if old['login_user_id'] != checkin_identity or reset:
+                    raise ValueError('account identity changed during daily check-in')
+                data['last_checkin_user_id'] = checkin_identity
             cursor = db.execute("UPDATE accounts SET " + ",".join(f"{key}=?" for key in data) + " WHERE id=?",
                                 (*data.values(), account_id))
             if not cursor.rowcount:

@@ -217,6 +217,49 @@ def clear_managed_profile(account: dict[str, Any], profiles: Path) -> None:
 
 
 class CDPBrowser:
+    def daily_checkin_from_page(self, expected_user_id: str, timezone: str) -> dict[str, Any]:
+        """Use the page's standard XHR and its naturally installed SDK context."""
+        payload = {'source': 'web', 'time_zone': timezone}
+        expression = '(async()=>{const expected=' + json.dumps(expected_user_id) + ',body=' + json.dumps(payload) + ';' + r"""
+          const uid=()=>{try{return String(JSON.parse(window.__businessUserInfoStringify||'{}')
+            .data?.consumer_user?.user_info?.user_id||'')}catch(_){return ''}};
+          if(location.origin!=='https://www.pippit.ai'||!expected||uid()!==expected)
+            return {transport_error:'identity_before'};
+          return await new Promise(resolve=>{
+            const request=new XMLHttpRequest();let finished=false;
+            const done=value=>{if(!finished){finished=true;resolve(value)}};
+            request.open('POST','https://www.pippit.ai/commerce/v1/benefits/credit_receive',true);
+            request.withCredentials=true;request.timeout=15000;
+            request.setRequestHeader('Content-Type','application/json');
+            request.onload=()=>{try{
+              const url=new URL(request.responseURL);
+              if(url.origin!=='https://www.pippit.ai'||url.pathname!=='/commerce/v1/benefits/credit_receive')
+                return done({transport_error:'response_origin'});
+              if(uid()!==expected)return done({transport_error:'identity_after'});
+              if(typeof request.responseText!=='string'||request.responseText.length>1048576)
+                return done({transport_error:'response_body'});
+              done({http:request.status,body:JSON.parse(request.responseText)});
+            }catch(_){done({transport_error:'response_body'})}};
+            request.onerror=()=>done({transport_error:'network'});
+            request.ontimeout=()=>done({transport_error:'timeout'});
+            request.onabort=()=>done({transport_error:'aborted'});
+            request.send(JSON.stringify(body));
+          });
+        })()"""
+        result = self.evaluate(expression, await_promise=True)
+        if not isinstance(result, dict) or result.get('transport_error'):
+            raise BrowserError('Pippit daily check-in page identity or request could not be verified')
+        if result.get('http') != 200:
+            raise BrowserRejected(f"Pippit daily check-in HTTP {result.get('http')}")
+        envelope = result.get('body')
+        if not isinstance(envelope, dict) or 'ret' not in envelope:
+            raise BrowserError('Pippit daily check-in response envelope is invalid')
+        if str(envelope['ret']) != '0':
+            raise BrowserRejected(f"Pippit ret={envelope['ret']}: {str(envelope.get('errmsg') or 'daily check-in rejected')[:200]}")
+        if not isinstance(envelope.get('data'), dict):
+            raise BrowserError('Pippit daily check-in response payload is invalid')
+        return envelope['data']
+
     def __init__(self, port: int, timeout: float = 90) -> None:
         self.port = int(port)
         self.timeout = timeout

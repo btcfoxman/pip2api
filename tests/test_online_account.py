@@ -91,6 +91,7 @@ class OnlineLoginTests(unittest.IsolatedAsyncioTestCase):
                 self.closed = True
 
         client = Mock()
+        client.login_identity.return_value = '42'
         client.account_state.return_value = {'available_balance': 123, 'buckets': {'gift': 123}}
         client.browser.project_id.return_value = '456'
         client.ensure_no_watermark.return_value = 'enabled'
@@ -138,6 +139,7 @@ class OnlineLoginTests(unittest.IsolatedAsyncioTestCase):
         desktop.start = Mock(return_value=asyncio.sleep(0))
         desktop.close = Mock(return_value=asyncio.sleep(0))
         client = Mock()
+        client.login_identity.return_value = '42'
         client.account_state.return_value = {'available_balance': 123, 'buckets': {}}
         client.browser.project_id.return_value = ''
         client.browser.ensure_project_id.return_value = '456'

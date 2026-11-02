@@ -254,6 +254,9 @@ class BrowserLoginManager:
                 self.desktops.pop(account_id, None)
                 desktop = None
             with self.service._lock:
+                if (account_id in getattr(self.service, '_checkin_owners', set())
+                        or account_id in getattr(self.service, '_health_inflight', set())):
+                    raise LoginError('account maintenance is in progress')
                 if self.service._active.get(account_id, 0) or self.store.active_account_count(account_id):
                     raise LoginError("account has active tasks")
                 try:
@@ -299,6 +302,7 @@ class BrowserLoginManager:
                     raise LoginError("account no longer exists", 404)
                 temporary = {**account, "cdp_port": active["desktop"].cdp_port}
                 client = UpstreamClient(temporary)
+                login_user_id = await asyncio.to_thread(client.login_identity)
                 state = await asyncio.to_thread(client.account_state)
                 project_id = client.browser.project_id()
                 if REQUIRES_PROJECT and not (project_id or account["project_id"]):
@@ -310,6 +314,8 @@ class BrowserLoginManager:
                     watermark_status = await asyncio.to_thread(client.ensure_no_watermark)
                 except (BrowserError, PippitError) as exc:
                     raise LoginError(f"Pippit no-watermark verification failed: {exc}") from exc
+                if await asyncio.to_thread(client.login_identity) != login_user_id:
+                    raise LoginError('Pippit account changed during login verification')
                 values = {"cdp_port": active["desktop"].cdp_port,
                           "managed_profile": True, "enabled": active["enable_after"],
                           "status": "active" if active["enable_after"] else "disabled",
@@ -323,7 +329,7 @@ class BrowserLoginManager:
                                    "last_error": f"credit balance below {threshold}"})
                 with self.service._lock:
                     self.store.clear_media_cache(account_id)
-                    result = self.store.update_account(account_id, values)
+                    result = self.store.update_account(account_id, values, login_identity=login_user_id)
                     self.active = None  # Viewer ticket expires; Chrome stays online.
                 result["watermark_status"] = watermark_status
                 return result
@@ -357,6 +363,9 @@ class BrowserLoginManager:
             if self.active and self.active["account_id"] == account_id:
                 raise LoginError("finish or cancel online login first")
             with self.service._lock:
+                if (account_id in getattr(self.service, '_checkin_owners', set())
+                        or account_id in getattr(self.service, '_health_inflight', set())):
+                    raise LoginError('account maintenance is in progress')
                 if self.service._active.get(account_id, 0) or self.store.active_account_count(account_id):
                     raise LoginError("account has active tasks")
                 try:

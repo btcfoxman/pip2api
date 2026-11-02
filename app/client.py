@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import ast
 import hashlib
+import math
 import os
+import re
 import threading
 import time
 import uuid
 from typing import Any
+from zoneinfo import ZoneInfo
 
-from .browser import CDPBrowser, account_proxy_url
+from .browser import BrowserError, CDPBrowser, account_proxy_url
 from .catalog import bind_prompt
 from .media import _download, upload_media, upload_media_bytes
 from .store import Store
@@ -29,6 +32,19 @@ def account_media_lock(account_id: int) -> threading.RLock:
 
 class PippitError(Exception):
     pass
+
+
+def validate_checkin_result(result: Any) -> None:
+    if not isinstance(result, dict):
+        raise PippitError("Pippit daily check-in response is not confirmed")
+    if "receive_quota" in result:
+        quota = result["receive_quota"]
+        if isinstance(quota, bool) or not isinstance(quota, (int, float)) or not math.isfinite(quota) or quota < 0:
+            raise PippitError("Pippit daily check-in quota is invalid")
+        return
+    if any(result.get(key) is True for key in ("already_received", "already_checked_in")):
+        return
+    raise PippitError("Pippit daily check-in response is not confirmed")
 
 
 class PippitAssetMismatch(PippitError):
@@ -219,8 +235,32 @@ class PippitClient:
         return "enabled"
 
     def daily_checkin(self) -> dict[str, Any]:
-        return self.browser.post("/commerce/v1/benefits/credit_receive",
-                                 {"source": "web", "time_zone": os.getenv("PIP_TIME_ZONE", "Asia/Taipei")})
+        # Standard XHR keeps the website's installed SDK context. Never copy
+        # signatures or replay a failed request inside this invocation.
+        identity = self.login_identity()
+        expected = self.account.get('login_user_id')
+        if expected and identity != expected:
+            raise PippitError('Pippit daily check-in identity does not match the saved profile')
+        timezone = os.getenv('PIP_TIME_ZONE', 'Asia/Taipei')
+        ZoneInfo(timezone)
+        result = self.browser.daily_checkin_from_page(identity, timezone)
+        validate_checkin_result(result)
+        return result
+
+    def login_identity(self) -> str:
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                value = self.browser.user_info().get("consumer_uid")
+                break
+            except BrowserError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(0.25, remaining))
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) or value == "0":
+            raise PippitError("Pippit account identity could not be verified")
+        return value
 
     def upload_inputs(self, normalized: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
         proxy = str(self.account.get("proxy_url") or "")

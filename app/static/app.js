@@ -37,7 +37,7 @@ function renderAccounts() {
   $("#enabledCount").textContent = enabled.length; $("#disabledCount").textContent = disabled.length;
   $("#accountsBody").innerHTML = items.map((account) => {
     const quota = account.balance_details || {};
-    const detail = `VIP ${quota.vip_credit ?? 0} / Gift ${quota.gift_credit ?? 0} / Add-on ${quota.purchase_credit ?? 0}`;
+    const detail = `VIP ${quota.vip_credit ?? 0} / Gift ${quota.gift_credit ?? 0} / Add-on ${quota.purchase_credit ?? 0}${quota._stale ? " · 额度明细待刷新" : ""}`;
     return `<tr><td><span class="cell-title"><span class="account-id mono">#${account.id}</span>${escapeHtml(account.name)}</span><span class="cell-sub">${escapeHtml(account.email || account.user_id || "")}</span></td>
       <td>${badge(account.enabled ? account.status : ["disabled_low_balance", "suspended"].includes(account.status) ? account.status : "disabled")}<span class="cell-sub" title="${escapeHtml(account.last_error)}">${escapeHtml(account.last_error)}</span></td>
       <td title="${escapeHtml(detail)}"><span class="cell-title mono">${escapeHtml(account.last_balance ?? "-")}</span><span class="cell-sub">${escapeHtml(detail)}</span></td>

@@ -21,6 +21,7 @@ from .browser import BrowserError, CDPBrowser, browser_alive, clear_managed_prof
 from .browser_login import BrowserLoginManager, LoginError
 from .browser_login_api import register_browser_login
 from .catalog import public_models
+from .client import PippitError
 from .service import AccountPoolUnavailable, Service
 from .store import Store
 
@@ -262,7 +263,7 @@ def check_account(account_id: int) -> dict[str, Any]:
     _account(account_id)
     try:
         return service.check_account(account_id)
-    except BrowserError as exc:
+    except (BrowserError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
@@ -271,7 +272,7 @@ def reconnect_account(account_id: int) -> dict[str, Any]:
     _account(account_id)
     try:
         return service.check_account(account_id, start_browser=True)
-    except BrowserError as exc:
+    except (BrowserError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
@@ -280,7 +281,7 @@ def checkin_account(account_id: int) -> dict[str, Any]:
     _account(account_id)
     try:
         return service.checkin_account(account_id)
-    except BrowserError as exc:
+    except (BrowserError, PippitError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

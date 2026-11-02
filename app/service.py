@@ -23,6 +23,7 @@ from .client import PippitClient, PippitError, account_media_lock
 from .errors import public_error
 from .media import MediaError
 from .store import Store
+from .daily_checkin import AccountCheckinBusy, DailyCheckinMixin, identity_snapshot, validated_credit_state
 
 
 TERMINAL = {"succeeded", "failed", "expired"}
@@ -89,7 +90,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 
-class Service:
+class Service(DailyCheckinMixin):
     def __init__(self, store: Store):
         self.store = store
         self._pool = ThreadPoolExecutor(max_workers=50, thread_name_prefix="pip-task")
@@ -102,6 +103,8 @@ class Service:
         self.browser_runtime = BrowserRuntime(store, self.settings)
         self._browser_views: dict[int, tuple[dict[str, Any], bool, float]] = {}
         self._browser_views_lock = threading.RLock()
+        self._health_inflight: set[int] = set()
+        self._init_daily_checkins()
 
     def settings(self) -> dict[str, Any]:
         return {**DEFAULT_SETTINGS, **self.store.get_settings()}
@@ -113,6 +116,7 @@ class Service:
             if key in filtered and not 1 <= int(filtered[key]) <= (3600 if key != "task_queue_capacity" else 10000):
                 raise ValueError(f"invalid {key}")
         self.store.update_settings(filtered)
+        self._checkin_wakeup.set()
         return self.settings()
 
     def start(self) -> None:
@@ -120,6 +124,7 @@ class Service:
         self._maintenance = threading.Thread(target=self._maintain_accounts, daemon=True,
                                              name="pip-account-maintenance")
         self._maintenance.start()
+        self._start_daily_checkins()
         for task in reversed(self.store.tasks(1000)):
             if task["status"] == "queued":
                 self._pool.submit(self._run, task["id"])
@@ -141,6 +146,7 @@ class Service:
 
     def stop(self) -> None:
         self._stop.set()
+        self._stop_daily_checkins()
         if self._maintenance and self._maintenance.is_alive():
             self._maintenance.join(timeout=5)
         self._pool.shutdown(wait=False, cancel_futures=False)
@@ -177,48 +183,43 @@ class Service:
 
     def _maintain_accounts(self) -> None:
         while not self._stop.is_set():
-            with self._browser_views_lock:
-                expired = [account_id for account_id, (_, _, touched) in self._browser_views.items()
-                           if time.monotonic() - touched > 20 * 60]
-            for account_id in expired:
-                self.close_browser_view(account_id)
-            settings = self.settings()
-            needs_rapid_recheck = False
-            for account in self.store.accounts(private=True):
-                if self._stop.is_set():
-                    break
-                if not account["enabled"] or not int(account["cdp_port"] or 0):
-                    continue
-                try:
-                    checked = self.check_account(int(account["id"]))
-                    if checked["status"] == "login_required":
-                        needs_rapid_recheck = True
-                    if checked["status"] == "active" and settings["daily_checkin_enabled"]:
-                        self.checkin_account(int(account["id"]))
-                except (BrowserError, ValueError, KeyError):
-                    needs_rapid_recheck = True
-                    continue
-            interval = max(30, int(settings["account_maintenance_interval_seconds"]))
-            # A restarted Chrome often exposes its tab before the app can make
-            # authenticated requests. Retry that state promptly instead of
-            # leaving a valid account unavailable for the full interval.
-            self._stop.wait(min(15, interval) if needs_rapid_recheck else interval)
+            try:
+                rapid = self._maintain_accounts_once()
+            except Exception:
+                logger.exception('PIP account maintenance failed; retrying')
+                rapid = True
+            try:
+                interval = max(30, int(self.settings()["account_maintenance_interval_seconds"]))
+            except (TypeError, ValueError):
+                interval = 300
+            self._stop.wait(min(15, interval) if rapid else interval)
 
-    def checkin_account(self, account_id: int) -> dict[str, Any]:
-        account = self.store.account(account_id, private=True)
-        if not account:
-            raise KeyError(account_id)
-        today = datetime.now(ZoneInfo(os.getenv("PIP_TIME_ZONE", "Asia/Taipei"))).date().isoformat()
-        if account.get("last_checkin_date") == today:
-            return {"already_checked_in": True, "date": today}
-        account, owned = self.browser_runtime.acquire(account)
-        try:
-            result = PippitClient(account).daily_checkin()
-        finally:
-            self.browser_runtime.release(account, owned)
-        self.store.update_account(account_id, {"last_checkin_date": today})
-        return {"already_checked_in": False, "date": today,
-                "received": result.get("receive_quota", 0)}
+    def _maintain_accounts_once(self) -> bool:
+        with self._browser_views_lock:
+            expired = [account_id for account_id, (_, _, touched) in self._browser_views.items()
+                       if time.monotonic() - touched > 20 * 60]
+        for account_id in expired:
+            self.close_browser_view(account_id)
+        needs_rapid_recheck = False
+        for account in self.store.accounts(private=True):
+            if self._stop.is_set():
+                break
+            if not account["enabled"] or not int(account["cdp_port"] or 0):
+                continue
+            with self._lock:
+                if (self._active.get(int(account['id']), 0)
+                        or int(account['id']) in self._checkin_draining
+                        or int(account['id']) in self._checkin_owners):
+                    continue
+            try:
+                checked = self.check_account(int(account["id"]))
+                if checked["status"] == "login_required":
+                    needs_rapid_recheck = True
+            except Exception as exc:
+                logger.warning('PIP account maintenance deferred account_id=%s error_type=%s',
+                               account['id'], type(exc).__name__)
+                needs_rapid_recheck = True
+        return needs_rapid_recheck
 
     def create(self, request: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_request(request)
@@ -245,6 +246,8 @@ class Service:
                 return None
             accounts = [item for item in self.store.accounts(private=True)
                         if int(item["id"]) not in excluded and item["enabled"]
+                        and int(item['id']) not in self._checkin_draining
+                        and int(item['id']) not in self._checkin_owners
                         and item["status"] == "active" and item["proxy_url"]
                         and (item["balance"] is None or float(item["balance"]) >= estimated_cost)]
             accounts.sort(key=lambda item: (-int(item["priority"]), -(float(item["balance"] or 0)), item["id"]))
@@ -266,22 +269,38 @@ class Service:
     def _release_account(self, account_id: int) -> None:
         with self._lock:
             self._active[account_id] = max(self._active.get(account_id, 1) - 1, 0)
+            if not self._active[account_id]:
+                self._checkin_wakeup.set()
 
     def check_account(self, account_id: int, *, start_browser: bool = False) -> dict[str, Any]:
         account = self.store.account(account_id, private=True)
         if not account:
             raise KeyError(account_id)
-        account, owned = self.browser_runtime.acquire(account, force_managed=start_browser)
+        with self._lock:
+            if (account_id in self._checkin_owners or account_id in self._health_inflight
+                    or account['status'] in {'logging_in', 'profile_resetting'}):
+                raise AccountCheckinBusy('Account browser is busy; account health check is deferred')
+            self._health_inflight.add(account_id)
+        owned = False
         try:
+            account, owned = self.browser_runtime.acquire(account, force_managed=start_browser)
             return self._check_account_live(account)
         finally:
-            self.browser_runtime.release(account, owned)
+            try:
+                self.browser_runtime.release(account, owned)
+            finally:
+                with self._lock:
+                    self._health_inflight.discard(account_id)
+                self._checkin_wakeup.set()
 
     def _check_account_live(self, account: dict[str, Any]) -> dict[str, Any]:
         account_id = int(account["id"])
+        def update_check(values):
+            return self.store.update_account(account_id, values,
+                expected={**identity_snapshot(account), 'status': account['status']})
         port = int(account["cdp_port"] or 0)
         if not browser_alive(port):
-            return self.store.update_account(account_id, {"status": "login_required",
+            return update_check({"status": "login_required",
                                                          "last_error": "Pippit account browser is unavailable"})
         # Chrome exposes a CDP page before Pippit's JavaScript has finished
         # loading. After a service restart, one early fetch failure should not
@@ -292,22 +311,22 @@ class Service:
                 state = PippitClient(account).account_state()
                 break
             except BrowserRejected as exc:
-                return self.store.update_account(account_id, {"status": "login_required", "last_error": str(exc)[:300]})
+                return update_check({"status": "login_required", "last_error": str(exc)[:300]})
             except BrowserError as exc:
                 if attempt == 2:
-                    return self.store.update_account(account_id, {"status": "login_required", "last_error": str(exc)[:300]})
+                    return update_check({"status": "login_required", "last_error": str(exc)[:300]})
                 time.sleep(1)
-        balance = state["available_balance"]
+        balance, buckets = validated_credit_state(state)
         project_id = PippitClient(account).browser.project_id()
         threshold = float(self.settings()["low_balance_disable_threshold"] or 0)
-        values: dict[str, Any] = {"balance": balance, "balance_details": state["buckets"],
+        values: dict[str, Any] = {"balance": balance, "balance_details": buckets,
                                   "status": "active", "last_error": ""}
         if project_id:
             values["project_id"] = project_id
         if threshold > 0 and balance < threshold:
             values.update({"enabled": False, "status": "disabled_low_balance",
                            "last_error": f"credit balance below {threshold}"})
-        return self.store.update_account(account_id, values)
+        return update_check(values)
 
     def _run(self, task_id: str) -> None:
         task = self.store.task(task_id)
