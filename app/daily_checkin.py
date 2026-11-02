@@ -53,7 +53,6 @@ class DailyCheckinMixin:
         self._checkin_wakeup = threading.Event()
         self._checkin_thread = None
         self._checkin_pending = {}
-        self._checkin_draining = set()
         self._checkin_inflight = set()
         self._checkin_owners = set()
         self._checkin_locks = {}
@@ -86,7 +85,6 @@ class DailyCheckinMixin:
         with self._lock:
             if not self.settings()['daily_checkin_enabled']:
                 self._checkin_pending.clear()
-                self._checkin_draining.clear()
                 return
             eligible = set()
             for account in self.store.accounts(private=True):
@@ -104,18 +102,10 @@ class DailyCheckinMixin:
             for identifier in list(self._checkin_pending):
                 if identifier not in eligible and identifier not in self._checkin_inflight:
                     self._checkin_pending.pop(identifier, None)
-                    self._checkin_draining.discard(identifier)
-            # Drain at most two accounts. The rest of the pool keeps accepting
-            # generation work while these accounts finish their existing tasks.
-            for identifier in self._checkin_pending:
-                if len(self._checkin_draining) >= 2:
-                    break
-                self._checkin_draining.add(identifier)
             for identifier in list(self._checkin_pending):
                 if len(self._checkin_inflight) >= 2:
                     break
-                if (identifier not in self._checkin_draining
-                        or identifier in self._checkin_inflight or identifier in self._checkin_owners
+                if (identifier in self._checkin_inflight or identifier in self._checkin_owners
                         or identifier in self._health_inflight
                         or self._active.get(identifier, 0) or self.store.active_account_count(identifier)):
                     continue
@@ -148,7 +138,6 @@ class DailyCheckinMixin:
                 self._checkin_inflight.discard(identifier)
                 if not busy:
                     self._checkin_pending.pop(identifier, None)
-                    self._checkin_draining.discard(identifier)
             self._checkin_wakeup.set()
 
     def checkin_account(self, account_id: int, *, automatic: bool = False) -> dict:

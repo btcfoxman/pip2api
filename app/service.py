@@ -208,7 +208,6 @@ class Service(DailyCheckinMixin):
                 continue
             with self._lock:
                 if (self._active.get(int(account['id']), 0)
-                        or int(account['id']) in self._checkin_draining
                         or int(account['id']) in self._checkin_owners):
                     continue
             try:
@@ -246,7 +245,6 @@ class Service(DailyCheckinMixin):
                 return None
             accounts = [item for item in self.store.accounts(private=True)
                         if int(item["id"]) not in excluded and item["enabled"]
-                        and int(item['id']) not in self._checkin_draining
                         and int(item['id']) not in self._checkin_owners
                         and item["status"] == "active" and item["proxy_url"]
                         and (item["balance"] is None or float(item["balance"]) >= estimated_cost)]

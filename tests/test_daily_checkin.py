@@ -50,15 +50,18 @@ def run_scheduled(context):
     function(*args)
 
 
-def test_busy_claim_drains_existing_work_and_last_release_wakes_without_claiming_early(context):
+def test_busy_due_account_accepts_more_work_and_claims_only_after_natural_idle(context):
     service, identifier = context.service, context.account['id']
     service.update_settings({'daily_checkin_enabled': True})
+    context.store.update_account(identifier, {'max_concurrency': 2})
     service._active[identifier] = 1
     service._schedule_daily_checkins()
-    assert identifier in service._checkin_draining
+    assert identifier in service._checkin_pending
     service._checkin_pool.submit.assert_not_called()
-    assert service._reserve_account() is None
+    selected = service._reserve_account()
+    assert selected['id'] == identifier and service._active[identifier] == 2
     context.client.daily_checkin.assert_not_called()
+    service._release_account(identifier)
     service._checkin_wakeup.clear()
     service._release_account(identifier)
     assert service._checkin_wakeup.is_set()
@@ -74,10 +77,10 @@ def test_busy_claim_drains_existing_work_and_last_release_wakes_without_claiming
     assert receipt(context)['last_checkin_date'] == context.day['value']
     assert receipt(context)['balance'] == 100
     context.client.daily_checkin.assert_called_once()
-    assert not service._checkin_draining and not service._checkin_pending
+    assert not service._checkin_pending
 
 
-def test_only_two_accounts_drain_while_the_other_five_continue_accepting_tasks(context):
+def test_only_two_idle_claims_queue_without_reserving_accounts_from_generation(context):
     service, store = context.service, context.store
     for index in range(2, 8):
         account = store.upsert_account({'name': f'account-{index}', 'cdp_port': 19300 + index,
@@ -85,11 +88,29 @@ def test_only_two_accounts_drain_while_the_other_five_continue_accepting_tasks(c
         store.update_account(account['id'], {'status': 'active', 'balance': 10}, login_identity=str(index))
     service.update_settings({'daily_checkin_enabled': True})
     service._schedule_daily_checkins()
-    assert len(service._checkin_pending) == 7 and len(service._checkin_draining) == 2
+    assert len(service._checkin_pending) == 7 and len(service._checkin_inflight) == 2
     assert service._checkin_pool.submit.call_count == 2
     selected = service._reserve_account()
-    assert selected and selected['id'] not in service._checkin_draining
+    assert selected and selected['id'] in service._checkin_inflight
+    assert not service._checkin_owners
     service._release_account(selected['id'])
+
+
+def test_generation_winning_the_idle_claim_queue_race_defers_claim_without_browser_work(context):
+    service = context.service
+    service.update_settings({'daily_checkin_enabled': True})
+    service._schedule_daily_checkins()
+    selected = service._reserve_account()
+    assert selected['id'] == context.account['id']
+    run_scheduled(context)
+    context.client.daily_checkin.assert_not_called()
+    service.browser_runtime.acquire.assert_not_called()
+    assert not service._checkin_owners and not service._checkin_retry
+    assert context.account['id'] in service._checkin_pending
+    service._release_account(selected['id'])
+    service._schedule_daily_checkins()
+    run_scheduled(context)
+    context.client.daily_checkin.assert_called_once()
 
 
 def test_gift_spent_today_is_not_a_missing_claim_and_day_rollover_is_eligible(context):
@@ -137,7 +158,7 @@ def test_claim_rejection_does_not_mark_date_or_balance_and_security_rejection_ba
     assert context.service._checkin_retry[account['id']][2] > 0
     context.service._schedule_daily_checkins()
     assert context.service._checkin_pool.submit.call_count == 1
-    assert not context.service._checkin_draining
+    assert not context.service._checkin_owners
     context.client.account_state.assert_not_called()
 
 
@@ -205,12 +226,12 @@ def test_health_check_and_claim_cannot_overwrite_each_others_credit_snapshot(con
     context.service._checkin_owners.clear()
 
 
-def test_disabling_automatic_claims_after_queueing_releases_drain_without_a_claim(context):
+def test_disabling_automatic_claims_after_queueing_skips_without_a_claim(context):
     context.service.update_settings({'daily_checkin_enabled': True})
     context.service._schedule_daily_checkins()
     context.service.update_settings({'daily_checkin_enabled': False})
     run_scheduled(context)
-    assert not context.service._checkin_draining
+    assert not context.service._checkin_owners
     context.client.daily_checkin.assert_not_called()
 
 
